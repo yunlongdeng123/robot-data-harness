@@ -1,0 +1,24 @@
+rules:
+  - name: quaternion_norm
+    metric: quat_max_norm_error
+    op: "<="
+    value: 1.0e-5
+    severity: fail
+
+  - name: velocity_jump
+    metric: max_velocity_mps
+    op: "<="
+    value: 2.0
+    severity: fail
+
+  - name: button_cluster_quality
+    metric: cluster_silhouette
+    op: ">="
+    value: 0.70
+    severity: fail
+
+  - name: press_count
+    metric: detected_press_count
+    op: "between"
+    value: [20, 30]
+    severity: warn

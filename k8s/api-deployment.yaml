@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: robot-dh-api
+  namespace: robot-dh
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: robot-dh-api
+  template:
+    metadata:
+      labels:
+        app: robot-dh-api
+    spec:
+      containers:
+        - name: api
+          image: robot-data-harness:local
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: robot-dh-remote-env
+                optional: true
+          command:
+            - /bin/sh
+            - -c
+            - |
+              export ROBOT_DH_DB_URI="${ROBOT_DH_DB_URI:-sqlite:///artifacts/registry/robot_dh.db}"
+              export ROBOT_DH_ARTIFACT_STORE="${ROBOT_DH_ARTIFACT_STORE:-local}"
+              exec python -m uvicorn robot_dh.api.main:app --host 0.0.0.0 --port 8000
+          env:
+            - name: ROBOT_DH_ARTIFACTS_DIR
+              value: /artifacts
+          ports:
+            - containerPort: 8000
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: artifacts
+              mountPath: /artifacts
+            - name: config
+              mountPath: /config
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: robot-dh-data-pvc
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: robot-dh-artifacts-pvc
+        - name: config
+          configMap:
+            name: robot-dh-config
+

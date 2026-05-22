@@ -1,0 +1,72 @@
+---
+description: 项目全局语言与代码风格约定（中文文档 + Python 类型提示 + 中文业务注释）
+alwaysApply: true
+---
+
+# 项目全局约定
+
+## 1. Markdown 文档（README、handbook、runbook、设计文档等）
+
+- **默认面向中文母语开发者**：所有 `*.md` 文档（包括 `README.md`、`docs/**/*.md`、根目录手册类文件）正文一律使用简体中文撰写。
+- 标题、章节说明、操作步骤、注意事项使用中文；只有以下内容保留英文原文：
+  - 命令、代码片段、路径、环境变量、配置键名（如 `make ingest`、`HF_TOKEN`、`s3://bucket/...`）
+  - 库名、产品名、协议名（如 `boto3`、`PostgreSQL`、`Parquet`）
+  - 错误信息、日志原文引用
+- 表格表头、提示框（`> Note:` 等）也使用中文。
+- 引入新概念时可在中文后括注英文术语，便于检索，例如：数据湖（data lake）。
+
+## 2. Python 代码风格
+
+### 2.1 类型提示（强制）
+
+所有函数 / 方法签名必须带完整类型提示，包括返回值；模块级常量、类属性也尽量标注类型。
+
+```python
+# ❌ BAD：缺少类型，注释啰嗦地复述代码
+def load(path):
+    # 打开文件
+    f = open(path)
+    # 读取所有行
+    lines = f.readlines()
+    return lines
+
+# ✅ GOOD：类型完整，注释只解释业务/边界
+def load_episodes(path: Path) -> list[Episode]:
+    # 单文件 episode 列表，按时间戳递增；上游保证已去重
+    with path.open("r", encoding="utf-8") as f:
+        return [Episode.from_json(line) for line in f]
+```
+
+### 2.2 注释规则
+
+- **注释一律使用简体中文**，禁止中英混写（专有名词例外）。
+- 注释只写**业务逻辑、约束、为什么这么做**，不复述代码字面意思。
+- 优先使用**简写单行注释**（`# ...`），避免长段落；如需详述，写到 docstring 而非散落的行注释。
+- 公开函数 / 类的 docstring 也用中文，首行一句话概括用途。
+- 禁止的注释类型：
+  - 复述型：`# 遍历列表`、`# 返回结果`
+  - 装饰型：`# ====== 分隔线 ======`（除非确实有助于阅读）
+  - 过期 TODO / 注释掉的旧代码
+
+### 2.3 示例
+
+```python
+def merge_shards(shards: list[Path], out: Path) -> int:
+    """合并同一 episode 的多个分片，返回写入的行数。"""
+    # 分片必须同属一个 episode，否则上游 etl 阶段有 bug
+    assert len({s.stem.split("-")[0] for s in shards}) == 1
+
+    rows: list[dict] = []
+    for shard in sorted(shards):
+        rows.extend(_read_jsonl(shard))
+
+    # 去重键：(episode_id, frame_idx)，保留最后一次采集
+    deduped = {(r["episode_id"], r["frame_idx"]): r for r in rows}
+    _write_parquet(out, list(deduped.values()))
+    return len(deduped)
+```
+
+## 3. 与用户交互
+
+- 助手回复使用简体中文。
+- 引用代码 / 路径 / 命令保留原文，避免翻译造成歧义。

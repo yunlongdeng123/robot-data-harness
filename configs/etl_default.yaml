@@ -1,0 +1,43 @@
+etl:
+  schema_version: "1.4"
+
+  normalize:
+    write_video_meta_when_missing: true
+    default_fps: 30.0
+    pose_format: eexyzxyzw
+
+  features:
+    velocity_jump_threshold_mps: 2.5
+    press_z_prominence: null
+    press_min_distance_frames: 5
+    expected_num_buttons: 5
+    kmeans_n_init: 20
+    kmeans_random_state: 0
+    quat_norm_tolerance: 1.0e-5
+    segment_velocity_quiet_threshold_mps: 0.05
+
+  ads:
+    score:
+      base: 100.0
+      max_velocity_penalty:
+        threshold_mps: 2.5
+        per_unit_over: 5.0
+        cap: 30.0
+      quat_error_penalty:
+        threshold: 1.0e-3
+        per_unit_over: 200.0
+        cap: 30.0
+      press_count_penalty:
+        target: 25
+        tolerance: 5
+        per_unit_off: 1.0
+        cap: 20.0
+      cluster_silhouette_penalty:
+        good: 0.5
+        zero_below: -0.1
+        per_unit_under: 40.0
+        cap: 20.0
+
+  runner:
+    summary_filename: etl_summary.json
+    scan_summary_filename: etl_scan_summary.json

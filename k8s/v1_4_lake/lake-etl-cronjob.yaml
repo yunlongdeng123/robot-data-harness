@@ -1,0 +1,70 @@
+# 定时 ETL Scan CronJob
+#
+# 周期性扫描 raw 数据资产并增量构建 ods/dwd。
+# ADS 不在此处自动构建（输出量更大且与查询频次解耦）；
+# 如需定时 ADS，请按相同模板复制一份单独的 CronJob。
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: robot-dh-lake-etl-scan
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: lake-etl
+    role: etl-scan-cron
+spec:
+  schedule: "0 */6 * * *"
+  timeZone: Asia/Shanghai
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 259200
+      template:
+        metadata:
+          labels:
+            app: robot-dh
+            component: lake-etl
+            role: etl-scan-cron
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: etl-scan
+              image: robot-data-harness:local
+              imagePullPolicy: IfNotPresent
+              envFrom:
+                - secretRef:
+                    name: robot-dh-lake-secrets
+                    optional: false
+              env:
+                - name: DATA_ROOT
+                  value: s3://robot-datasets
+                - name: LAKE_ROOT
+                  value: s3://robot-lake
+                - name: SCAN_LIMIT
+                  value: "50"
+                - name: ROBOT_DH_LOG_FORMAT
+                  value: json
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eo pipefail
+                  : "${ROBOT_DH_DB_URI:?ROBOT_DH_DB_URI is required}"
+                  : "${ROBOT_DH_S3_ENDPOINT_URL:?ROBOT_DH_S3_ENDPOINT_URL is required}"
+                  : "${ROBOT_DH_S3_ACCESS_KEY:?ROBOT_DH_S3_ACCESS_KEY is required}"
+                  : "${ROBOT_DH_S3_SECRET_KEY:?ROBOT_DH_S3_SECRET_KEY is required}"
+                  echo "[etl-scan-cron] root=${DATA_ROOT} lake_root=${LAKE_ROOT} limit=${SCAN_LIMIT}"
+                  exec robot-dh etl scan \
+                    --root "${DATA_ROOT}" \
+                    --lake-root "${LAKE_ROOT}" \
+                    --limit "${SCAN_LIMIT}"
+              resources:
+                requests:
+                  cpu: "500m"
+                  memory: "1Gi"
+                limits:
+                  cpu: "2"
+                  memory: "4Gi"

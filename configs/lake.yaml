@@ -1,0 +1,54 @@
+lake:
+  schema_version: "1.4"
+
+  buckets:
+    data: robot-datasets
+    artifact: robot-dh-artifacts
+    lake: robot-lake
+
+  layers:
+    - raw
+    - ods
+    - dwd
+    - ads
+    - lineage
+    - tmp
+
+  prefix_template:
+    raw: "raw/{dataset_id}/{version}"
+    ods: "ods/{dataset_id}/{version}"
+    dwd: "dwd/{dataset_id}/{version}"
+    ads: "ads/quality"
+    lineage: "lineage/events/{yyyy}/{mm}/{dd}"
+    tmp: "tmp/{run_id}"
+
+  ods_files:
+    - pose.parquet
+    - video_meta.parquet
+    - episode_meta.parquet
+
+  dwd_files:
+    - pose_feature.parquet
+    - press_event.parquet
+    - trajectory_segment.parquet
+    - episode_feature.parquet
+
+  ads_files:
+    - dataset_quality_summary.parquet
+    - validator_failure_stats.parquet
+    - episode_quality_score.parquet
+
+  manifest_filename: _manifest.json
+  manifest_required_fields:
+    - dataset_id
+    - version
+    - layer
+    - created_at
+    - schema_version
+    - source_uris
+    - output_uri
+    - files
+
+  hard_constraints:
+    raw_layer_append_only: true
+    forbid_cross_layer_reverse_write: true

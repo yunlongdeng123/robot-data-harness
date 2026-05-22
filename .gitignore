@@ -1,0 +1,43 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.dylib
+*.dll
+htmlcov/
+runs/
+samples/
+.robot_dh/
+
+# ---- secrets / credentials (NEVER commit) ----
+# k8s secret with real credentials
+k8s/secret.yaml
+k8s/*-secret.yaml
+!k8s/*-secret.example.yaml
+
+# client env / shell scripts that may embed real passwords
+client/wsl-export-*.sh
+client/*.env
+!client/*.env.example
+
+# v1.4 lake assets (cloud handoff artifacts that may carry secrets/internal info)
+client/k8s-lake-secret.yaml
+client/k8s-create-lake-secret.sh
+!client/k8s-lake-secret.example.yaml
+!client/k8s-create-lake-secret.example.sh
+
+# remote asset inventory snapshots (internal layout / object lists)
+docs/remote_assets_*.json
+client/remote_assets_*.json
+
+# personal handoff cache (real-password env lives outside repo anyway,
+# but if someone drops a copy here we still want it ignored)
+.handoff_cache/

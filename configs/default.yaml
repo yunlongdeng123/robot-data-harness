@@ -1,0 +1,43 @@
+dataset:
+  expected_pose_dim: 7
+  default_fps: 30
+  min_samples: 10
+
+quality_gate:
+  fail_on_warning: false
+
+validators:
+  quaternion:
+    quat_norm_tol: 1.0e-5
+
+  euler_stability:
+    max_roll_var: 1.0e-3
+    max_pitch_var: 1.0e-3
+
+  velocity_jump:
+    velocity_threshold_mps: 2.0
+
+  press_event:
+    smooth_window: 21
+    smooth_polyorder: 3
+    press_min_distance_sec: 0.8
+    press_prominence: null
+    press_expected_min_count: 5
+    press_expected_max_count: 100
+
+  xy_cluster:
+    method: kmeans
+    expected_num_buttons: 5
+    min_cluster_silhouette: 0.70
+    min_points_per_cluster: 2
+    random_state: 42
+
+  workspace_bbox:
+    bbox_margin_ratio: 0.5
+    max_outside_ratio: 0.10
+    fail_on_excessive_outside: false
+
+reports:
+  save_plots: true
+  html: true
+  json: true

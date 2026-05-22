@@ -1,0 +1,64 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: robot-dh-scan
+  namespace: robot-dh
+spec:
+  schedule: "0 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: scan
+              image: robot-data-harness:local
+              imagePullPolicy: IfNotPresent
+              envFrom:
+                - secretRef:
+                    name: robot-dh-remote-env
+                    optional: true
+              env:
+                - name: ROBOT_DH_ARTIFACTS_DIR
+                  value: /artifacts
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  export ROBOT_DH_DB_URI="${ROBOT_DH_DB_URI:-sqlite:///artifacts/registry/robot_dh.db}"
+                  export ROBOT_DH_ARTIFACT_STORE="${ROBOT_DH_ARTIFACT_STORE:-local}"
+                  exec robot-dh scan \
+                    --root /data \
+                    --config /config/button_press.yaml \
+                    --output-root /artifacts/scan \
+                    --registry \
+                    --only-new \
+                    --gate-policy /config/gate_policy.yaml \
+                    --log-format json
+              resources:
+                requests:
+                  cpu: "500m"
+                  memory: "512Mi"
+                limits:
+                  cpu: "2"
+                  memory: "2Gi"
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+                - name: artifacts
+                  mountPath: /artifacts
+                - name: config
+                  mountPath: /config
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: robot-dh-data-pvc
+            - name: artifacts
+              persistentVolumeClaim:
+                claimName: robot-dh-artifacts-pvc
+            - name: config
+              configMap:
+                name: robot-dh-config

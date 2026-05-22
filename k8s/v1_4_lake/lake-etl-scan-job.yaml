@@ -1,0 +1,63 @@
+# 批量 ETL Scan Job
+#
+# 自动发现 s3://robot-datasets 下的 raw 数据资产并执行 etl run。
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: robot-dh-lake-etl-scan
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: lake-etl
+    role: etl-scan
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: robot-dh
+        component: lake-etl
+        role: etl-scan
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: etl-scan
+          image: robot-data-harness:local
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: robot-dh-lake-secrets
+                optional: false
+          env:
+            - name: DATA_ROOT
+              value: s3://robot-datasets
+            - name: LAKE_ROOT
+              value: s3://robot-lake
+            - name: SCAN_LIMIT
+              value: "10"
+            - name: ROBOT_DH_LOG_FORMAT
+              value: json
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eo pipefail
+              : "${ROBOT_DH_DB_URI:?ROBOT_DH_DB_URI is required (set via robot-dh-lake-secrets)}"
+              : "${ROBOT_DH_S3_ENDPOINT_URL:?ROBOT_DH_S3_ENDPOINT_URL is required}"
+              : "${ROBOT_DH_S3_ACCESS_KEY:?ROBOT_DH_S3_ACCESS_KEY is required}"
+              : "${ROBOT_DH_S3_SECRET_KEY:?ROBOT_DH_S3_SECRET_KEY is required}"
+              : "${DATA_ROOT:?DATA_ROOT is required}"
+              : "${LAKE_ROOT:?LAKE_ROOT is required}"
+              : "${SCAN_LIMIT:?SCAN_LIMIT is required}"
+              echo "[etl-scan] root=${DATA_ROOT} lake_root=${LAKE_ROOT} limit=${SCAN_LIMIT}"
+              exec robot-dh etl scan \
+                --root "${DATA_ROOT}" \
+                --lake-root "${LAKE_ROOT}" \
+                --limit "${SCAN_LIMIT}"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"

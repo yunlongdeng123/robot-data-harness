@@ -1,0 +1,69 @@
+# 单数据集 ETL Job (raw -> ods -> dwd)
+#
+# 通过下列方式覆盖默认参数：
+#   kubectl -n robot-dh set env job/robot-dh-lake-etl-one DATASET_ID=foo
+# 或在 apply 前用 envsubst / yq 渲染。
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: robot-dh-lake-etl-one
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: lake-etl
+    role: etl-one
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: robot-dh
+        component: lake-etl
+        role: etl-one
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: etl-one
+          image: robot-data-harness:local
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: robot-dh-lake-secrets
+                optional: false
+          env:
+            - name: DATASET_URI
+              value: s3://robot-datasets/button_press_001/v1
+            - name: DATASET_ID
+              value: button_press_001
+            - name: DATASET_VERSION
+              value: v1
+            - name: LAKE_ROOT
+              value: s3://robot-lake
+            - name: ROBOT_DH_LOG_FORMAT
+              value: json
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eo pipefail
+              : "${ROBOT_DH_DB_URI:?ROBOT_DH_DB_URI is required (set via robot-dh-lake-secrets)}"
+              : "${ROBOT_DH_S3_ENDPOINT_URL:?ROBOT_DH_S3_ENDPOINT_URL is required}"
+              : "${ROBOT_DH_S3_ACCESS_KEY:?ROBOT_DH_S3_ACCESS_KEY is required}"
+              : "${ROBOT_DH_S3_SECRET_KEY:?ROBOT_DH_S3_SECRET_KEY is required}"
+              : "${DATASET_URI:?DATASET_URI is required}"
+              : "${DATASET_ID:?DATASET_ID is required}"
+              : "${DATASET_VERSION:?DATASET_VERSION is required}"
+              : "${LAKE_ROOT:?LAKE_ROOT is required}"
+              echo "[etl-one] dataset=${DATASET_URI} id=${DATASET_ID} version=${DATASET_VERSION} lake_root=${LAKE_ROOT}"
+              exec robot-dh etl run \
+                --dataset "${DATASET_URI}" \
+                --dataset-id "${DATASET_ID}" \
+                --version "${DATASET_VERSION}" \
+                --lake-root "${LAKE_ROOT}"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"

@@ -1,0 +1,87 @@
+{
+  "_comment": [
+    "RECEIVER-SIDE RECONSTRUCTION of the v1.4 MinIO IAM policy attached to the",
+    "application user `robotdhapp`. Produced from WSL by combining the original",
+    "handoff list (docs/v1_4_handoff_inbox.md \u00a71) with what the account can",
+    "actually do (boto3 list_buckets visibility confirmed: robot-datasets,",
+    "robot-dh-artifacts, robot-dh-backups, robot-lake). Once SSH is restored,",
+    "replace this with the authoritative",
+    "  /opt/robot-dh-infra/minio/policies/robot_dh_lake_readwrite.json"
+  ],
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListAllOwnedBuckets",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::robot-datasets",
+        "arn:aws:s3:::robot-dh-artifacts",
+        "arn:aws:s3:::robot-dh-backups",
+        "arn:aws:s3:::robot-lake"
+      ]
+    },
+    {
+      "Sid": "ReadWriteRobotDatasets",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::robot-datasets/*"
+      ]
+    },
+    {
+      "Sid": "ReadWriteArtifacts",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::robot-dh-artifacts/*"
+      ]
+    },
+    {
+      "Sid": "ReadWriteLakeButNotDeleteRaw",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::robot-lake/*"
+      ]
+    },
+    {
+      "Sid": "DeleteOnlyOdsDwdAdsTmp",
+      "Effect": "Allow",
+      "Action": [
+        "s3:DeleteObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::robot-lake/ods/*",
+        "arn:aws:s3:::robot-lake/dwd/*",
+        "arn:aws:s3:::robot-lake/ads/*",
+        "arn:aws:s3:::robot-lake/tmp/*",
+        "arn:aws:s3:::robot-lake/lineage/*"
+      ]
+    },
+    {
+      "Sid": "ReadOnlyBackups",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::robot-dh-backups/*"
+      ]
+    }
+  ]
+}

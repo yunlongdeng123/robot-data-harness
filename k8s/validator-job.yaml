@@ -1,0 +1,58 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: robot-dh-validator
+  namespace: robot-dh
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: validator
+          image: robot-data-harness:local
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: robot-dh-remote-env
+                optional: true
+          env:
+            - name: ROBOT_DH_ARTIFACTS_DIR
+              value: /artifacts
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              export ROBOT_DH_DB_URI="${ROBOT_DH_DB_URI:-sqlite:///artifacts/registry/robot_dh.db}"
+              export ROBOT_DH_ARTIFACT_STORE="${ROBOT_DH_ARTIFACT_STORE:-local}"
+              exec robot-dh validate \
+                --dataset /data/button_press_001 \
+                --config /config/button_press.yaml \
+                --output /artifacts/button_press_001 \
+                --run-id k8s-demo \
+                --record-to-registry \
+                --gate-policy /config/gate_policy.yaml \
+                --log-format json
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: artifacts
+              mountPath: /artifacts
+            - name: config
+              mountPath: /config
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: robot-dh-data-pvc
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: robot-dh-artifacts-pvc
+        - name: config
+          configMap:
+            name: robot-dh-config

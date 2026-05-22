@@ -1,0 +1,43 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# 国内镜像源默认（阿里云），加速 PyPI + PyTorch CPU wheel 下载。
+# 海外环境 / CI 可通过 --build-arg 覆盖回官方源，例如:
+#   docker build \
+#     --build-arg PIP_INDEX_URL=https://pypi.org/simple/ \
+#     --build-arg TORCH_WHEEL_INDEX=https://download.pytorch.org/whl/cpu \
+#     --build-arg TORCH_SPEC=torch \
+#     -t robot-data-harness:local -f docker/Dockerfile .
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ARG TORCH_WHEEL_INDEX=https://mirrors.aliyun.com/pytorch-wheels/cpu/
+ARG TORCH_SPEC=torch==2.6.0+cpu
+
+ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PIP_DEFAULT_TIMEOUT=180 \
+    PIP_RETRIES=5 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        libglib2.0-0 \
+        libgl1 \
+        libsm6 \
+        libxext6 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir \
+        --find-links ${TORCH_WHEEL_INDEX} \
+        "${TORCH_SPEC}"
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+COPY . /app
+RUN pip install --no-cache-dir --no-deps .
+
+ENTRYPOINT ["robot-dh"]
+CMD ["--help"]

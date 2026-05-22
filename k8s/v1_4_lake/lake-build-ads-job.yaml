@@ -1,0 +1,61 @@
+# ADS 构建 Job (dwd -> ads/quality)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: robot-dh-lake-build-ads
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: lake-etl
+    role: build-ads
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: robot-dh
+        component: lake-etl
+        role: build-ads
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: build-ads
+          image: robot-data-harness:local
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: robot-dh-lake-secrets
+                optional: false
+          env:
+            - name: DWD_INPUT_ROOT
+              value: s3://robot-lake/dwd
+            - name: ADS_OUTPUT
+              value: s3://robot-lake/ads/quality
+            - name: LAKE_ROOT
+              value: s3://robot-lake
+            - name: ROBOT_DH_LOG_FORMAT
+              value: json
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eo pipefail
+              : "${ROBOT_DH_DB_URI:?ROBOT_DH_DB_URI is required}"
+              : "${ROBOT_DH_S3_ENDPOINT_URL:?ROBOT_DH_S3_ENDPOINT_URL is required}"
+              : "${ROBOT_DH_S3_ACCESS_KEY:?ROBOT_DH_S3_ACCESS_KEY is required}"
+              : "${ROBOT_DH_S3_SECRET_KEY:?ROBOT_DH_S3_SECRET_KEY is required}"
+              : "${DWD_INPUT_ROOT:?DWD_INPUT_ROOT is required}"
+              : "${ADS_OUTPUT:?ADS_OUTPUT is required}"
+              : "${LAKE_ROOT:?LAKE_ROOT is required}"
+              echo "[build-ads] input_root=${DWD_INPUT_ROOT} output=${ADS_OUTPUT} lake_root=${LAKE_ROOT}"
+              exec robot-dh build-ads \
+                --input-root "${DWD_INPUT_ROOT}" \
+                --output "${ADS_OUTPUT}" \
+                --lake-root "${LAKE_ROOT}"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"

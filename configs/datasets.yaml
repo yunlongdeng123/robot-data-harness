@@ -1,0 +1,16 @@
+datasets:
+  bridgedata_v2:
+    canonical_id: bridgedata_v2
+    aliases:
+      - bridgedata-v2
+    raw_versions:
+      - sample
+  droid:
+    canonical_id: droid
+    raw_versions:
+      - calibration
+      - lerobot_sample
+  robomimic:
+    canonical_id: robomimic
+    raw_versions:
+      - sample

@@ -1,0 +1,37 @@
+# 数据湖 debug Pod
+#
+# 用于在集群内手动执行：
+#   kubectl -n robot-dh exec -it robot-dh-lake-debug -- robot-dh infra doctor
+#   kubectl -n robot-dh exec -it robot-dh-lake-debug -- robot-dh lake audit
+#   kubectl -n robot-dh exec -it robot-dh-lake-debug -- robot-dh lake list
+apiVersion: v1
+kind: Pod
+metadata:
+  name: robot-dh-lake-debug
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: lake-debug
+spec:
+  restartPolicy: Always
+  containers:
+    - name: lake-debug
+      image: robot-data-harness:local
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c"]
+      args:
+        - "echo '[lake-debug] 就绪；请用 kubectl exec 执行 robot-dh 命令' && sleep infinity"
+      envFrom:
+        - secretRef:
+            name: robot-dh-lake-secrets
+            optional: true
+      env:
+        - name: ROBOT_DH_LOG_FORMAT
+          value: json
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "256Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
