@@ -1,5 +1,6 @@
-# v1.5 `etl_shards` 对齐交接文档
+# v1.5 `etl_shards` 对齐交接文档（已闭环 / 历史记录）
 
+> 状态：**已 apply，闭环**（远端 `robot-dh-infra` 已经跑完 `33_pg_apply_etl_shards_align.sh` + `30_pg_v1_5_smoke_test.sh`；主项目模型已对齐并通过 `tests/test_warehouse_service.py`）。保留本文档作为字段约定与历史参考，**不需要再次执行**。
 > 面向：本地 WSL 上的主项目 `robot-data-harness`
 > 关联远端仓库：`robot-dh-infra`（已在远端服务器 `/opt/robot-dh-infra` 部署）
 > 关联 Argo 工作流：`robot-dh-scale30-etl-g29nh`（命名空间 `robot-dh`）

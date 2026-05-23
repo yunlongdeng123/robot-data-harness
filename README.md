@@ -1,23 +1,34 @@
-## robot-data-harness v1.4
+## robot-data-harness v1.5
 
 `robot-data-harness` 是一个面向机械臂末端位姿 `eexyzxyzw` 数据集的 Kubernetes-native 数据质量与评测 Harness。它覆盖数据集注册、轨迹校验、质量门禁、报告生成、运行历史沉淀，以及在 WSL / kind / Kubernetes Job 中对远端 PostgreSQL、MinIO、Redis 的统一接入。
 
-**v1.4 引入数据湖分层 + ETL**（raw / ods / dwd / ads）+ 5 张 PostgreSQL lake 元数据表 + 5 个 FastAPI 只读查询接口；完全向后兼容 v1.3 的 validate / scan / gate / registry / S3 artifact 行为。
+**v1.5 在 v1.4 数据湖之上扩展为 scale-out 流水线 + 评测体系**：
 
-当前仓库的运行口径有三条主线：
+- **Sharded ETL**：`robot-dh etl plan / run-shard / merge-summary`，把 30GB+ raw 数据装箱到多个 shard 并行执行
+- **Scale Benchmark**：`robot-dh mutate` 注入异常 + `robot-dh benchmark run` 验证 validator quality gate
+- **ETL Performance Profiler**：每阶段写入 `etl_perf_runs`（input/output bytes、rows、duration、peak memory）
+- **Runtime Events**：`runtime_events_YYYYmmdd.jsonl` + 可选 `runtime_events` 表
+- **Argo Workflows**：`robot-dh-scale-etl` / `robot-dh-benchmark` / `robot-dh-build-ads` 三个 WorkflowTemplate + CronWorkflow
+- **Prometheus exporter**：独立 Go 进程 `robot-dh-exporter`，把 PostgreSQL 元数据转成 Prometheus 指标
+
+完全向后兼容 v1.4 数据湖（`normalize → build-features → build-ads`）与 v1.3 的 validate / scan / gate / registry / S3 artifact 行为。
+
+当前仓库的运行口径有四条主线：
 
 - 默认兼容模式：本地 SQLite + 本地 artifact + kind PVC demo（与 v1.3 完全一致）
 - 远端直连模式：公网白名单直连 PostgreSQL / MinIO / Redis（推荐生产路径）
-- **v1.4 新增 — 数据湖 ETL**：`normalize → build-features → build-ads` 三段流水，输出 parquet + `_manifest.json`，落 `lake_assets` / `etl_jobs` / `lineage_edges` / `dataset_versions` / `quality_snapshots`
+- v1.4 数据湖 ETL：`normalize → build-features → build-ads` 三段流水，落 `lake_assets` / `etl_jobs` / `lineage_edges` / `dataset_versions` / `quality_snapshots`
+- **v1.5 Argo 编排**：Sharded ETL / Benchmark / build-ADS 由 Argo Workflows 调度；写入 `etl_perf_runs` / `etl_shards` / `benchmark_runs` / `benchmark_cases` / `runtime_events`
 
 本仓库已经完成并验证以下链路：
 
-- 本地 `make test`（v1.3 完整 + v1.4 lake / ETL / API / 可选集成测试；无远端服务时可选测试跳过）
-- WSL 公网白名单直连的 `infra doctor` (含 lake)、`lake audit`、`lake list`、`etl run`、`etl scan`
+- 本地 `make test`（v1.3 完整 + v1.4 lake + v1.5 sharded ETL / benchmark / profiler / runtime events / API 只读端点；无远端服务时可选测试跳过）
+- WSL 公网白名单直连的 `infra doctor` (含 lake)、`lake audit`、`lake list`、`etl run`、`etl scan`、`etl plan / run-shard / merge-summary`、`benchmark run / report`
 - kind / K8s remote Secret 模式下的 validator job、scan job、API `/health`、`/infra/health`
-- 使用默认 BuildKit 的正式镜像重建，并完成 kind 回滚验证
+- kind 上的 Argo Workflows：`robot-dh-scale-etl` / `robot-dh-benchmark` / `robot-dh-build-ads` + CronWorkflow
+- 独立 Go exporter `robot-dh-exporter`（`/metrics` + `/healthz`）
 
-包版本当前为 `0.1.4`。
+包版本当前为 `0.1.5`。
 
 ## 目录
 
@@ -40,6 +51,7 @@
 - [安全与提交说明](#安全与提交说明)
 - [v1.4 数据湖](#v14-数据湖)
 - [v1.4 K8s ETL 调度](#v14-k8s-etl-调度)
+- [v1.5 Scale Benchmark + Sharded ETL + Runtime Profiling](#v15-scale-benchmark--sharded-etl--runtime-profiling)
 
 ## 核心能力
 
@@ -87,7 +99,6 @@ kind 集群 / K8s Pod
 
 - WSL 和 kind 都直接连接公网 IP 或 DNS
 - `client/wsl-export-public-env.sh` 是推荐入口
-- `client/wsl-export-env.sh` 和 loopback tunnel 仅保留为历史兼容路径
 - `k8s/secret.yaml` 中必须写公网地址，不应再写 `127.0.0.1`
 
 ## 仓库结构
@@ -302,8 +313,6 @@ curl http://127.0.0.1:8000/infra/health
 ```bash
 source client/wsl-export-public-env.sh
 ```
-
-如果你仍在调试历史 tunnel 方案，可以使用 `client/wsl-export-env.sh`，但它不再是 README 的主路径。
 
 ### 2. 运行远端诊断
 
@@ -591,7 +600,7 @@ robot-dh infra doctor --check db,s3,redis
 
 ## API 参考
 
-当前 FastAPI 服务位于 `robot_dh.api.main:app`，版本号为 `0.1.4`。
+当前 FastAPI 服务位于 `robot_dh.api.main:app`，版本号为 `0.1.5`。
 
 ### 接口列表
 
@@ -846,7 +855,7 @@ DOCKER_BUILDKIT=0 docker build -t robot-data-harness:local -f docker/Dockerfile 
 ## 安全与提交说明
 
 - `k8s/secret.yaml` 应视为本地私有文件，不应提交
-- `client/wsl-export-public-env.sh` 与 `client/wsl-export-env.sh` 可能包含真实凭证，建议仅保留在本地环境
+- `client/wsl-export-public-env.sh` 可能包含真实凭证，建议仅保留在本地环境
 - `client/robot-dh-public.env` 与 `k8s/secret.example.yaml` 只应存放示例值，不应写入真实密码
 - v1.4 真实密码 lake env 必须放在 `~/.config/robot-dh/robot-dh-lake.env`（权限 0600），仓库已配置 `.gitignore` 兜底
 

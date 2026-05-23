@@ -1,5 +1,6 @@
-# v1.5 benchmark_cases / benchmark_runs 对齐交接文档
+# v1.5 benchmark_cases / benchmark_runs 对齐交接文档（已闭环 / 历史记录）
 
+> 状态：**已 apply，闭环**（远端 `robot-dh-infra` 已经跑完 `34_pg_apply_benchmark_align.sh` + `30_pg_v1_5_smoke_test.sh`；主项目 `BenchmarkCaseRow` / `BenchmarkRunRow` 已对齐并通过 `tests/test_warehouse_service.py` 与 `tests/test_benchmark_runner.py`）。保留本文档作为字段约定与历史参考，**不需要再次执行**。
 > 面向：本地 WSL 上的主项目 `robot-data-harness`
 > 关联远端仓库：`robot-dh-infra`（已在远端服务器 `/opt/robot-dh-infra` 部署）
 > 关联工作流：benchmark suite workflow（Argo `robot-dh` 命名空间）
