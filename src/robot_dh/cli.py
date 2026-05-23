@@ -3,8 +3,15 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict
 import json
+import os
 from pathlib import Path
 
+from robot_dh.benchmark import (
+    apply_mutation,
+    list_supported_mutations,
+    run_benchmark,
+)
+from robot_dh.benchmark.report import render_summary_from_dir
 from robot_dh.data.synthetic import generate_demo_dataset
 from robot_dh.etl.ads import build_ads
 from robot_dh.etl.features import build_features
@@ -22,9 +29,18 @@ from robot_dh.lake.commands import (
     render_list_human,
 )
 from robot_dh.logging_utils import configure_logging
+from robot_dh.perf import emit_perf_records, perf_records_from_etl_run
+from robot_dh.perf.io_stats import measure_uri_bytes
 from robot_dh.pipeline import compare_reports, run_validation
 from robot_dh.registry import RegistryService
+from robot_dh.runtime.events import RuntimeEventLogger
 from robot_dh.scan import scan_datasets
+from robot_dh.sharding.io import read_json_uri, write_json_uri
+from robot_dh.sharding.merge import merge_shard_summaries
+from robot_dh.sharding.models import EtlPlan
+from robot_dh.sharding.planner import plan_etl
+from robot_dh.sharding.shard_runner import run_shard
+from robot_dh.warehouse.service import WarehouseService
 
 
 def _print_json(payload: object) -> None:
@@ -123,6 +139,8 @@ def build_parser() -> argparse.ArgumentParser:
     lake_list_parser = lake_subparsers.add_parser("list", help="List lake assets by layer")
     lake_list_parser.add_argument("--layer", choices=("raw", "ods", "dwd", "ads", "lineage", "tmp"), default=None)
     lake_list_parser.add_argument("--lake-root", dest="lake_root", type=str, default=None)
+    lake_list_parser.add_argument("--include", dest="include", action="append", default=None, help="glob filter applied to slice keys (multi-valued)")
+    lake_list_parser.add_argument("--exclude", dest="exclude", action="append", default=None, help="glob filter excluding slice keys (multi-valued)")
     lake_list_parser.add_argument("--output", choices=("human", "json"), default="human")
     lake_audit_parser = lake_subparsers.add_parser("audit", help="Audit lake (bucket, prefixes, manifest completeness, PG tables)")
     lake_audit_parser.add_argument("--output", choices=("human", "json"), default="human")
@@ -163,6 +181,8 @@ def build_parser() -> argparse.ArgumentParser:
     etl_run_parser.add_argument("--ads-config", type=Path, default=Path("configs/etl_default.yaml"))
     etl_run_parser.add_argument("--summary-dir", type=Path, default=None)
     etl_run_parser.add_argument("--job-id", type=str, default=None)
+    etl_run_parser.add_argument("--perf-dir", type=Path, default=None, help="write v1.5 perf JSON next to summary")
+    etl_run_parser.add_argument("--log-format", choices=("human", "json"), default="human")
 
     etl_scan_parser = etl_subparsers.add_parser("scan", help="Discover datasets and run etl run for each")
     etl_scan_parser.add_argument("--root", type=str, required=True, help="Data root (e.g. s3://robot-datasets)")
@@ -173,6 +193,65 @@ def build_parser() -> argparse.ArgumentParser:
     etl_scan_parser.add_argument("--features-config", type=Path, default=Path("configs/etl_default.yaml"))
     etl_scan_parser.add_argument("--ads-config", type=Path, default=Path("configs/etl_default.yaml"))
     etl_scan_parser.add_argument("--summary-dir", type=Path, default=None)
+    etl_scan_parser.add_argument("--include", action="append", default=None, help="glob filter on dataset_id (multi-valued)")
+    etl_scan_parser.add_argument("--exclude", action="append", default=None, help="glob filter excluding dataset_id (multi-valued)")
+    etl_scan_parser.add_argument("--log-format", choices=("human", "json"), default="human")
+
+    # v1.5: etl plan
+    etl_plan_parser = etl_subparsers.add_parser("plan", help="Plan sharded ETL: discover datasets and partition them into shards")
+    etl_plan_parser.add_argument("--root", type=str, required=True, help="raw root URI (e.g. s3://robot-datasets/raw)")
+    etl_plan_parser.add_argument("--lake-root", type=str, required=True)
+    etl_plan_parser.add_argument("--output", type=str, required=True, help="plan JSON output path (local) or s3:// URI")
+    etl_plan_parser.add_argument("--target-shard-size-gb", type=float, default=5.0)
+    etl_plan_parser.add_argument("--max-shards", type=int, default=16)
+    etl_plan_parser.add_argument("--include", action="append", default=None)
+    etl_plan_parser.add_argument("--exclude", action="append", default=None)
+    etl_plan_parser.add_argument("--log-format", choices=("human", "json"), default="human")
+
+    # v1.5: etl run-shard
+    etl_run_shard_parser = etl_subparsers.add_parser("run-shard", help="Execute a single shard of an etl plan")
+    etl_run_shard_parser.add_argument("--plan", type=str, required=True, help="plan JSON local path or s3:// URI")
+    etl_run_shard_parser.add_argument("--shard-id", required=True, help="shard index (int) or shard_id (string)")
+    etl_run_shard_parser.add_argument("--lake-root", type=str, default=None)
+    etl_run_shard_parser.add_argument("--output", type=Path, required=True, help="local work dir for shard outputs")
+    etl_run_shard_parser.add_argument("--summary-uri", type=str, default=None, help="optional s3:// URI to upload shard_summary.json")
+    etl_run_shard_parser.add_argument("--max-workers", type=int, default=1)
+    etl_run_shard_parser.add_argument("--fail-fast", action="store_true")
+    etl_run_shard_parser.add_argument("--build-ads", action="store_true")
+    etl_run_shard_parser.add_argument("--features-config", type=Path, default=Path("configs/etl_default.yaml"))
+    etl_run_shard_parser.add_argument("--ads-config", type=Path, default=Path("configs/etl_default.yaml"))
+    etl_run_shard_parser.add_argument("--work-dir", type=Path, default=None)
+    etl_run_shard_parser.add_argument("--tmp-dir", type=Path, default=None)
+    etl_run_shard_parser.add_argument("--log-format", choices=("human", "json"), default="human")
+
+    # v1.5: etl merge-summary
+    etl_merge_parser = etl_subparsers.add_parser("merge-summary", help="Aggregate shard summaries into a plan-level summary")
+    etl_merge_parser.add_argument("--plan", type=str, required=True)
+    etl_merge_parser.add_argument("--shard-results", type=str, required=True, help="dir or s3:// prefix containing shard_summary.json files")
+    etl_merge_parser.add_argument("--output", type=str, required=True)
+    etl_merge_parser.add_argument("--log-format", choices=("human", "json"), default="human")
+
+    # v1.5: mutate
+    mutate_parser = subparsers.add_parser("mutate", help="Apply a benchmark mutation to a local dataset")
+    mutate_parser.add_argument("--dataset", type=Path, required=True)
+    mutate_parser.add_argument("--output", type=Path, required=True)
+    mutate_parser.add_argument("--mutation", type=str, required=True, choices=list_supported_mutations())
+    mutate_parser.add_argument("--log-format", choices=("human", "json"), default="human")
+
+    # v1.5: benchmark
+    benchmark_parser = subparsers.add_parser("benchmark", help="v1.5 benchmark commands")
+    benchmark_subparsers = benchmark_parser.add_subparsers(dest="benchmark_command")
+    benchmark_run_parser = benchmark_subparsers.add_parser("run", help="Run a benchmark suite")
+    benchmark_run_parser.add_argument("--suite", type=Path, required=True)
+    benchmark_run_parser.add_argument("--output", type=Path, required=True)
+    benchmark_run_parser.add_argument("--record-to-registry", action="store_true")
+    benchmark_run_parser.add_argument("--config", type=Path, default=Path("configs/button_press.yaml"))
+    benchmark_run_parser.add_argument("--gate-policy", type=Path, default=None)
+    benchmark_run_parser.add_argument("--log-format", choices=("human", "json"), default="human")
+
+    benchmark_report_parser = benchmark_subparsers.add_parser("report", help="Render markdown summary from a benchmark dir")
+    benchmark_report_parser.add_argument("--benchmark-dir", type=Path, required=True)
+    benchmark_report_parser.add_argument("--log-format", choices=("human", "json"), default="human")
 
     return parser
 
@@ -306,7 +385,12 @@ def main(argv: list[str] | None = None) -> int:
                 print(render_init_human(payload))
             return 1 if payload["status"] == "FAIL" else 0
         if args.lake_command == "list":
-            payload = lake_list(layer=args.layer, lake_root_uri=args.lake_root)
+            payload = lake_list(
+                layer=args.layer,
+                lake_root_uri=args.lake_root,
+                include=args.include,
+                exclude=args.exclude,
+            )
             if args.output == "json":
                 _print_json(payload)
             else:
@@ -399,6 +483,17 @@ def main(argv: list[str] | None = None) -> int:
                 job_id=args.job_id,
                 summary_dir=args.summary_dir,
             )
+            try:
+                input_bytes_estimate = measure_uri_bytes(args.dataset)
+            except Exception:
+                input_bytes_estimate = 0
+            perf_records = perf_records_from_etl_run(
+                etl_result=result,
+                run_id=result.job_id,
+                input_bytes_estimate=input_bytes_estimate,
+            )
+            perf_dir = args.perf_dir or args.summary_dir
+            emit_perf_records(perf_records, work_dir=perf_dir)
             _print_json(result.to_dict())
             return 0 if result.status in {"OK", "WARN"} else 1
         if args.etl_command == "scan":
@@ -411,9 +506,104 @@ def main(argv: list[str] | None = None) -> int:
                 features_config_path=args.features_config,
                 ads_config_path=args.ads_config,
                 summary_dir=args.summary_dir,
+                include_patterns=args.include,
+                exclude_patterns=args.exclude,
             )
             _print_json(result.to_dict())
             return 0 if result.failed == 0 else 1
+        if args.etl_command == "plan":
+            plan = plan_etl(
+                root_uri=args.root,
+                lake_root=args.lake_root,
+                target_shard_size_gb=args.target_shard_size_gb,
+                max_shards=args.max_shards,
+                include_patterns=args.include,
+                exclude_patterns=args.exclude,
+            )
+            output_path = write_json_uri(args.output, plan.to_dict())
+            warehouse = WarehouseService(soft=True)
+            events = RuntimeEventLogger(warehouse=warehouse)
+            events.emit(
+                "etl_plan_created",
+                payload={
+                    "plan_id": plan.plan_id,
+                    "output_uri": output_path,
+                    "total_datasets": plan.total_datasets,
+                    "total_bytes": plan.total_bytes,
+                    "num_shards": len(plan.shards),
+                },
+                run_id=plan.plan_id,
+            )
+            _print_json({"plan_path": output_path, "plan": plan.to_dict()})
+            return 0
+        if args.etl_command == "run-shard":
+            plan_raw = read_json_uri(args.plan)
+            plan = EtlPlan.from_dict(plan_raw)
+            shard_arg: int | str
+            if args.shard_id.isdigit():
+                shard_arg = int(args.shard_id)
+            else:
+                shard_arg = args.shard_id
+            work_dir = args.work_dir or args.output
+            if args.tmp_dir is not None:
+                args.tmp_dir.mkdir(parents=True, exist_ok=True)
+                # pyarrow / tempfile 都优先读这些变量，便于 K8s 指向 emptyDir。
+                os.environ["TMPDIR"] = args.tmp_dir.as_posix()
+                os.environ["TEMP"] = args.tmp_dir.as_posix()
+                os.environ["TMP"] = args.tmp_dir.as_posix()
+            summary = run_shard(
+                plan=plan,
+                shard_id=shard_arg,
+                lake_root=args.lake_root,
+                work_dir=Path(work_dir),
+                output_summary_uri=args.summary_uri,
+                max_workers=args.max_workers,
+                fail_fast=args.fail_fast,
+                features_config_path=args.features_config,
+                ads_config_path=args.ads_config,
+                build_ads_layer=args.build_ads,
+            )
+            _print_json(summary.to_dict())
+            if summary.status == "FAIL":
+                return 1
+            return 0
+        if args.etl_command == "merge-summary":
+            plan_raw = read_json_uri(args.plan)
+            plan = EtlPlan.from_dict(plan_raw)
+            payload = merge_shard_summaries(
+                plan=plan,
+                shard_results_uri=args.shard_results,
+                output_uri=args.output,
+            )
+            _print_json(payload)
+            return 0 if payload.get("failed", 0) == 0 else 1
+        parser.print_help()
+        return 0
+
+    if args.command == "mutate":
+        target = apply_mutation(
+            source_dataset=args.dataset,
+            output_dataset=args.output,
+            mutation=args.mutation,
+        )
+        _print_json({"output": target.as_posix(), "mutation": args.mutation})
+        return 0
+
+    if args.command == "benchmark":
+        if args.benchmark_command == "run":
+            report = run_benchmark(
+                suite_path=args.suite,
+                output_dir=args.output,
+                record_to_registry=args.record_to_registry,
+                default_config_path=args.config,
+                gate_policy_path=args.gate_policy,
+            )
+            _print_json(report.to_dict())
+            return 0 if report.failed == 0 else 1
+        if args.benchmark_command == "report":
+            text = render_summary_from_dir(args.benchmark_dir)
+            print(text)
+            return 0
         parser.print_help()
         return 0
 

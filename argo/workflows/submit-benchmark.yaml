@@ -1,0 +1,23 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: robot-dh-benchmark-
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: v1-5-argo
+    role: benchmark
+    template: robot-dh-benchmark
+spec:
+  workflowTemplateRef:
+    name: robot-dh-benchmark
+  arguments:
+    parameters:
+      - name: benchmark_suite
+        value: "configs/benchmark_suite.yaml"
+      - name: dataset_dir
+        value: "/workspace/samples/button_press_001"
+      - name: report_dir
+        value: "/workspace/runs/benchmark/v1_5"
+      - name: lake_root
+        value: "s3://robot-lake"

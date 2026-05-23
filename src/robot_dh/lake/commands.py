@@ -36,12 +36,30 @@ def lake_init(*, output: str = "human") -> dict[str, Any]:
     return payload
 
 
+def _matches_filter(
+    candidate: str,
+    include: list[str] | None,
+    exclude: list[str] | None,
+) -> bool:
+    import fnmatch
+
+    if include:
+        if not any(fnmatch.fnmatch(candidate, pat) for pat in include):
+            return False
+    if exclude:
+        if any(fnmatch.fnmatch(candidate, pat) for pat in exclude):
+            return False
+    return True
+
+
 def lake_list(
     *,
     layer: str | None,
     lake_root_uri: str | None = None,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
 ) -> dict[str, Any]:
-    """枚举数据湖资产；layer 为 None 时列出全部标准分层。"""
+    """枚举数据湖资产；layer 为 None 时列出全部标准分层。可选 include/exclude glob 过滤 slice key。"""
     root = lake_root_uri or _default_lake_root_uri()
     layers = [layer] if layer else list(LAKE_LAYERS_DEFAULT)
     store = create_lake_store(root)
@@ -59,8 +77,8 @@ def lake_list(
             )
             continue
 
-        # ods/dwd 按 (dataset_id, version) 聚合 slice
-        if ly in ("ods", "dwd"):
+        # ods/dwd/raw 按 (dataset_id, version) 聚合 slice
+        if ly in ("ods", "dwd", "raw"):
             seen: set[tuple[str, str]] = set()
             for obj in items:
                 if is_s3_uri(obj):
@@ -79,6 +97,12 @@ def lake_list(
                     continue
                 seen.add((parts[0], parts[1]))
             for ds, ver in sorted(seen):
+                if not _matches_filter(f"{ds}/{ver}", include, exclude):
+                    continue
+                if not _matches_filter(ds, include, exclude) and (include or exclude):
+                    # 双重 fallback：允许 include 只匹配 dataset_id
+                    if not _matches_filter(f"{ds}/{ver}", include, exclude):
+                        continue
                 slice_uri = join_uri(layer_uri, ds, ver)
                 slices.append(
                     {

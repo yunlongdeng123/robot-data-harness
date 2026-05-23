@@ -1,0 +1,39 @@
+suite_name: robot_data_quality_v1_5
+description: |
+  v1.5 默认 benchmark 套件，覆盖 mutation -> 预期失败 validator 的回归矩阵。
+  case `clean_demo` 期望 PASS；其余 case 通过 robot_dh.benchmark.mutations 注入预期失败。
+cases:
+  - case_id: clean_demo
+    dataset: samples/button_press_001
+    expected_status: PASS
+    expected_failed_validators: []
+  - case_id: velocity_spike
+    source_dataset: samples/button_press_001
+    mutation: velocity_spike
+    expected_status: FAIL
+    expected_failed_validators:
+      - velocity_jump
+  - case_id: quat_drift
+    source_dataset: samples/button_press_001
+    mutation: quat_drift
+    expected_status: FAIL
+    expected_failed_validators:
+      - quaternion
+  - case_id: missing_press
+    source_dataset: samples/button_press_001
+    mutation: missing_press
+    expected_status: FAIL
+    expected_failed_validators:
+      - press_event
+  - case_id: xy_cluster_collapse
+    source_dataset: samples/button_press_001
+    mutation: xy_cluster_collapse
+    expected_status: FAIL
+    expected_failed_validators:
+      - xy_cluster
+  - case_id: schema_missing_column
+    source_dataset: samples/button_press_001
+    mutation: schema_missing_column
+    expected_status: FAIL
+    expected_failed_validators:
+      - schema

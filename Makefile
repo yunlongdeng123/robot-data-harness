@@ -30,7 +30,13 @@ DATASETS_BUCKET_REMOTE ?= robot-datasets
         etl-remote-one etl-remote-scan k8s-run-etl-remote \
         k8s-apply-lake-secret-example k8s-apply-lake k8s-lake-doctor \
         k8s-run-etl-one k8s-run-etl-scan k8s-run-build-ads \
-        k8s-lake-logs k8s-apply-lake-cron k8s-lake-status k8s-delete-lake-jobs
+        k8s-lake-logs k8s-apply-lake-cron k8s-lake-status k8s-delete-lake-jobs \
+        benchmark-local etl-plan-scale30 etl-run-shard-0 etl-merge-scale30 perf-query v1-5-smoke \
+        argo-install argo-status argo-ui-port-forward argo-apply-rbac argo-apply-templates \
+        argo-submit-scale-etl argo-submit-benchmark argo-submit-build-ads argo-apply-cron \
+        argo-list argo-logs argo-delete-completed k8s-apply-v1-5-secret-example \
+        exporter-build exporter-test exporter-run exporter-docker-build exporter-kind-load \
+        exporter-k8s-apply exporter-port-forward exporter-logs
 
 setup:
 	$(PIP) install --upgrade pip
@@ -264,3 +270,143 @@ k8s-delete-lake-jobs:
 	kubectl -n $(LAKE_NS) delete job $(LAKE_ETL_SCAN_JOB) --ignore-not-found
 	kubectl -n $(LAKE_NS) delete job $(LAKE_BUILD_ADS_JOB) --ignore-not-found
 	@echo "已删除 lake Job。命名空间 $(LAKE_NS)、Secret $(LAKE_SECRET_NAME) 与 debug Pod $(LAKE_DEBUG_POD) 已保留。"
+
+# ---------- v1.5 Scale Benchmark / Sharded ETL ----------
+
+V1_5_BENCH_OUT ?= runs/benchmark/v1_5
+V1_5_PLAN ?= runs/plans/scale30_plan.json
+V1_5_SUMMARY ?= runs/plans/scale30_summary.json
+V1_5_SHARDS_DIR ?= runs/shards/scale30
+V1_5_SHARD_ID ?= 0
+V1_5_BENCH_SUITE ?= configs/benchmark_suite.yaml
+V1_5_SCALE_INCLUDE ?= *scale30*
+V1_5_TARGET_SHARD_GB ?= 5
+V1_5_MAX_WORKERS ?= 2
+
+benchmark-local: demo-data
+	PYTHONPATH=src $(PYTHON) -m robot_dh.cli benchmark run \
+		--suite $(V1_5_BENCH_SUITE) \
+		--output $(V1_5_BENCH_OUT)
+
+etl-plan-scale30:
+	@test -n "$$ROBOT_DH_S3_LAKE_BUCKET" || (echo "请先 source client/robot-dh-v1-5.env" && exit 1)
+	PYTHONPATH=src $(PYTHON) -m robot_dh.cli etl plan \
+		--root s3://$(DATASETS_BUCKET_REMOTE)/raw \
+		--lake-root $(LAKE_ROOT_REMOTE) \
+		--include "$(V1_5_SCALE_INCLUDE)" \
+		--target-shard-size-gb $(V1_5_TARGET_SHARD_GB) \
+		--output $(V1_5_PLAN)
+
+etl-run-shard-0:
+	@test -n "$$ROBOT_DH_S3_LAKE_BUCKET" || (echo "请先 source client/robot-dh-v1-5.env" && exit 1)
+	PYTHONPATH=src $(PYTHON) -m robot_dh.cli etl run-shard \
+		--plan $(V1_5_PLAN) \
+		--shard-id $(V1_5_SHARD_ID) \
+		--lake-root $(LAKE_ROOT_REMOTE) \
+		--output $(V1_5_SHARDS_DIR)/shard_$(V1_5_SHARD_ID) \
+		--max-workers $(V1_5_MAX_WORKERS)
+
+etl-merge-scale30:
+	PYTHONPATH=src $(PYTHON) -m robot_dh.cli etl merge-summary \
+		--plan $(V1_5_PLAN) \
+		--shard-results $(V1_5_SHARDS_DIR) \
+		--output $(V1_5_SUMMARY)
+
+perf-query:
+	@echo "查询 etl_perf_runs / etl_shards / benchmark_runs 需先 source client/robot-dh-v1-5.env"
+	@echo "示例: curl http://localhost:8000/etl/perf?dataset_id=button_press_001"
+	@echo "      curl http://localhost:8000/etl/shards?plan_id=plan-..."
+	@echo "      curl http://localhost:8000/benchmark/runs"
+	@echo "      curl http://localhost:8000/events?event_type=etl_shard_finished"
+
+v1-5-smoke:
+	$(MAKE) demo-data
+	$(MAKE) benchmark-local
+	@echo "v1.5 smoke 完成；查看 $(V1_5_BENCH_OUT)/benchmark_report.json"
+
+# ---------- v1.5 Argo Workflows ----------
+
+ARGO_NS ?= argo
+ROBOT_DH_NS ?= robot-dh
+
+argo-install:
+	./argo/scripts/argo_install.sh
+
+argo-status:
+	kubectl get pods -n $(ARGO_NS) -o wide || true
+	kubectl -n $(ROBOT_DH_NS) get workflows.argoproj.io,cronworkflows.argoproj.io,workflowtemplates.argoproj.io 2>/dev/null || true
+
+argo-ui-port-forward:
+	kubectl -n $(ARGO_NS) port-forward svc/argo-server 2746:2746
+
+k8s-apply-v1-5-secret-example:
+	@echo "拒绝直接 apply k8s/v1_5_argo/secret.example.yaml。"
+	@echo "推荐安全流程:"
+	@echo "  1) source client/robot-dh-v1-5.env"
+	@echo "  2) ./scripts/k8s_create_v1_5_secret_from_env.sh"
+	@echo ""
+	@echo "若坚持 apply 示例文件（仅 kind 调试用）:"
+	@echo "  kubectl apply -f k8s/v1_5_argo/secret.example.yaml"
+
+argo-apply-rbac:
+	kubectl apply -f k8s/namespace.yaml
+	kubectl apply -f k8s/v1_5_argo/serviceaccount.yaml
+	kubectl apply -f k8s/v1_5_argo/role.yaml
+	kubectl apply -f k8s/v1_5_argo/rolebinding.yaml
+	kubectl apply -f k8s/v1_5_argo/configmap.yaml
+
+argo-apply-templates:
+	kubectl apply -f argo/templates/
+
+argo-submit-scale-etl:
+	./argo/scripts/argo_submit_scale_etl.sh
+
+argo-submit-benchmark:
+	./argo/scripts/argo_submit_benchmark.sh
+
+argo-submit-build-ads:
+	NS=$(ROBOT_DH_NS) kubectl -n $(ROBOT_DH_NS) create -f argo/workflows/submit-build-ads.yaml
+
+argo-apply-cron:
+	kubectl apply -f argo/cron/scale-etl-cronworkflow.yaml
+
+argo-list:
+	kubectl -n $(ROBOT_DH_NS) get workflows.argoproj.io --sort-by=.metadata.creationTimestamp
+
+argo-logs:
+	./argo/scripts/argo_get_latest_logs.sh
+
+argo-delete-completed:
+	./argo/scripts/argo_delete_completed.sh
+
+# ---------- v1.5 robot-dh-exporter (Go) ----------
+
+EXPORTER_DIR ?= go/robot-dh-exporter
+EXPORTER_IMAGE ?= robot-dh-exporter:local
+GOPROXY ?= https://goproxy.cn,direct
+
+exporter-build:
+	cd $(EXPORTER_DIR) && GOPROXY=$(GOPROXY) go build -trimpath -ldflags="-s -w" -o ./bin/robot-dh-exporter ./
+
+exporter-test:
+	cd $(EXPORTER_DIR) && GOPROXY=$(GOPROXY) go test ./...
+
+exporter-run:
+	@test -n "$$ROBOT_DH_DB_URI" || (echo "请先 export ROBOT_DH_DB_URI=postgresql://..." && exit 1)
+	cd $(EXPORTER_DIR) && GOPROXY=$(GOPROXY) go run ./
+
+exporter-docker-build:
+	cd $(EXPORTER_DIR) && docker build --build-arg GO_PROXY=$(GOPROXY) -t $(EXPORTER_IMAGE) -f Dockerfile .
+
+exporter-kind-load:
+	kind load docker-image $(EXPORTER_IMAGE) --name robot-dh
+
+exporter-k8s-apply:
+	kubectl apply -f $(EXPORTER_DIR)/k8s/deployment.yaml
+	kubectl apply -f $(EXPORTER_DIR)/k8s/service.yaml
+
+exporter-port-forward:
+	kubectl -n robot-dh port-forward svc/robot-dh-exporter 9108:9108
+
+exporter-logs:
+	kubectl -n robot-dh logs deploy/robot-dh-exporter --tail=200

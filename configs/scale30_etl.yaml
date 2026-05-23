@@ -1,0 +1,12 @@
+scale_etl:
+  root_uri: s3://robot-datasets/raw
+  lake_root: s3://robot-lake
+  include_patterns:
+    - "*scale30*"
+  exclude_patterns:
+    - "*sample*"
+    - "*bridgedata_v2_scale30*"
+  target_shard_size_gb: 5
+  max_shards: 16
+  max_workers: 2
+  fail_fast: false

@@ -1,0 +1,29 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: robot-dh-scale30-etl-
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: v1-5-argo
+    role: scale-etl
+    template: robot-dh-scale-etl
+spec:
+  workflowTemplateRef:
+    name: robot-dh-scale-etl
+  arguments:
+    parameters:
+      - name: root_uri
+        value: "s3://robot-datasets/raw"
+      - name: lake_root
+        value: "s3://robot-lake"
+      - name: include_pattern
+        value: "*scale30*"
+      - name: exclude_pattern
+        value: "*bridgedata_v2_scale30*"
+      - name: target_shard_size_gb
+        value: "5"
+      - name: max_workers
+        value: "2"
+      - name: max_shards
+        value: "3"

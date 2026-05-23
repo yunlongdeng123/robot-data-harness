@@ -1,0 +1,89 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: robot-dh-build-ads
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: v1-5-argo
+    role: build-ads
+spec:
+  serviceAccountName: robot-dh-workflow
+  entrypoint: main
+  ttlStrategy:
+    secondsAfterCompletion: 86400
+    secondsAfterFailure: 172800
+  podGC:
+    strategy: OnWorkflowSuccess
+  activeDeadlineSeconds: 1800
+  podSpecPatch: |
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      fsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+  arguments:
+    parameters:
+      - name: lake_root
+        value: "s3://robot-lake"
+      - name: input_root
+        value: "s3://robot-lake/dwd"
+      - name: output_uri
+        value: "s3://robot-lake/ads/quality"
+  templates:
+    - name: main
+      steps:
+        - - name: build
+            template: build-ads
+            arguments:
+              parameters:
+                - name: input_root
+                  value: "{{workflow.parameters.input_root}}"
+                - name: output_uri
+                  value: "{{workflow.parameters.output_uri}}"
+                - name: lake_root
+                  value: "{{workflow.parameters.lake_root}}"
+
+    - name: build-ads
+      inputs:
+        parameters:
+          - name: input_root
+          - name: output_uri
+          - name: lake_root
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        envFrom:
+          - secretRef:
+              name: robot-dh-v1-5-secrets
+              optional: false
+          - configMapRef:
+              name: robot-dh-v1-5-config
+              optional: true
+        env:
+          - name: ARGO_WORKFLOW_NAME
+            value: "{{workflow.name}}"
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            set -euo pipefail
+            echo "{\"event\":\"argo_step_started\",\"step\":\"build-ads\",\"workflow\":\"${ARGO_WORKFLOW_NAME}\"}"
+            robot-dh build-ads \
+              --input-root "{{inputs.parameters.input_root}}" \
+              --output "{{inputs.parameters.output_uri}}" \
+              --lake-root "{{inputs.parameters.lake_root}}"
+            echo "{\"event\":\"argo_step_finished\",\"step\":\"build-ads\",\"workflow\":\"${ARGO_WORKFLOW_NAME}\"}"
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "2"
+            memory: "2Gi"
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]

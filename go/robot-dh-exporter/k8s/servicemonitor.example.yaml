@@ -1,0 +1,22 @@
+# 仅当集群里有 kube-prometheus-stack（CRD `ServiceMonitor`）时才能 apply 该文件。
+# 该 manifest 演示如何把 robot-dh-exporter 接入 Prometheus Operator。
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: robot-dh-exporter
+  namespace: robot-dh
+  labels:
+    app: robot-dh-exporter
+    release: kube-prometheus-stack  # 按本地 Prometheus Operator 的 selector 调整
+spec:
+  selector:
+    matchLabels:
+      app: robot-dh-exporter
+  namespaceSelector:
+    matchNames:
+      - robot-dh
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+      scheme: http

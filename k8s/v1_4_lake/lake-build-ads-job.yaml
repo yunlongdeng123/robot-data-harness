@@ -11,6 +11,7 @@ metadata:
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 86400
+  activeDeadlineSeconds: 3600
   template:
     metadata:
       labels:
@@ -19,8 +20,14 @@ spec:
         role: build-ads
     spec:
       restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
       containers:
         - name: build-ads
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           image: robot-data-harness:local
           imagePullPolicy: IfNotPresent
           envFrom:

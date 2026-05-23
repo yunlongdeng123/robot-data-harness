@@ -13,6 +13,7 @@ metadata:
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 86400
+  activeDeadlineSeconds: 7200
   template:
     metadata:
       labels:
@@ -21,8 +22,14 @@ spec:
         role: etl-scan
     spec:
       restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
       containers:
         - name: etl-scan
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           image: robot-data-harness:local
           imagePullPolicy: IfNotPresent
           envFrom:

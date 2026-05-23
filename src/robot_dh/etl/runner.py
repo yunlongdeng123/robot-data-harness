@@ -345,6 +345,29 @@ def _existing_layers(lake_root_uri: str, ds: str, ver: str) -> dict[str, bool]:
     }
 
 
+def _filter_discovered(
+    discovered: list[tuple[str, str, str]],
+    include_patterns: list[str] | None,
+    exclude_patterns: list[str] | None,
+) -> list[tuple[str, str, str]]:
+    import fnmatch
+
+    out = list(discovered)
+    if include_patterns:
+        out = [
+            d
+            for d in out
+            if any(fnmatch.fnmatch(d[0], pat) or fnmatch.fnmatch(d[2], pat) for pat in include_patterns)
+        ]
+    if exclude_patterns:
+        out = [
+            d
+            for d in out
+            if not any(fnmatch.fnmatch(d[0], pat) or fnmatch.fnmatch(d[2], pat) for pat in exclude_patterns)
+        ]
+    return out
+
+
 def etl_scan(
     *,
     root_uri: str,
@@ -356,6 +379,8 @@ def etl_scan(
     ads_config_path: Path | None = None,
     db_uri: str | None = None,
     summary_dir: Path | None = None,
+    include_patterns: list[str] | None = None,
+    exclude_patterns: list[str] | None = None,
 ) -> EtlScanResult:
     """发现 `<root_uri>/raw/` 下数据集并对每个执行 etl_run。"""
     scan_id = f"etl-scan-{uuid.uuid4().hex[:12]}"
@@ -363,6 +388,7 @@ def etl_scan(
     LOG.info("etl_scan START: scan_id=%s root=%s lake=%s", scan_id, root_uri, lake_root_uri)
 
     discovered = _discover_raw_datasets(root_uri)
+    discovered = _filter_discovered(discovered, include_patterns, exclude_patterns)
     if limit is not None and limit > 0:
         discovered = discovered[:limit]
 

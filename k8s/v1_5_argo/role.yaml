@@ -1,0 +1,25 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: robot-dh-workflow
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: v1-5-argo
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["workflows", "workflowtemplates", "workflows/status", "workflowtaskresults", "workflowtasksets", "workflowartifactgctasks", "cronworkflows"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    resourceNames: ["robot-dh-v1-5-config", "robot-dh-v1-5-secrets"]
+    verbs: ["get"]

@@ -1,0 +1,12 @@
+runtime:
+  # 默认日志格式
+  log_format: human
+  # 默认 work_dir / tmp_dir 相对工作区
+  work_dir: runs
+  tmp_dir: /tmp/robot-dh
+  # 并发 worker 数；本地一般 1，K8s ETL 推荐 2
+  max_workers: 1
+  # 默认遇到失败是否立刻停止 shard 内剩余 dataset
+  fail_fast: false
+  # 本地 runtime_events JSONL 默认目录
+  events_dir: runs/events

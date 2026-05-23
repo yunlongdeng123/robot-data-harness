@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: robot-dh-v1-5-config
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: v1-5-argo
+data:
+  SCALE_ROOT: "s3://robot-datasets/raw"
+  LAKE_ROOT: "s3://robot-lake"
+  SCALE_INCLUDE: "*scale30*"
+  TARGET_SHARD_SIZE_GB: "5"
+  MAX_WORKERS: "2"
+  BENCHMARK_SUITE: "configs/benchmark_suite.yaml"
+  ROBOT_DH_LOG_FORMAT: "json"
+  ROBOT_DH_EVENTS_DIR: "/workspace/runs/events"

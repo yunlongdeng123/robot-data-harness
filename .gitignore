@@ -41,3 +41,9 @@ client/remote_assets_*.json
 # personal handoff cache (real-password env lives outside repo anyway,
 # but if someone drops a copy here we still want it ignored)
 .handoff_cache/
+
+.cursor/
+
+# Go exporter build artifacts
+go/robot-dh-exporter/bin/
+go/robot-dh-exporter/vendor/

@@ -28,7 +28,7 @@ class ValidateRequest(BaseModel):
     artifact_prefix: str | None = None
 
 
-app = FastAPI(title="robot-data-harness", version="0.1.4")
+app = FastAPI(title="robot-data-harness", version="0.1.5")
 
 
 @app.get("/health")
@@ -137,5 +137,77 @@ def etl_job_detail(job_id: str) -> dict:
 def quality_summary(limit: int = 50) -> list[dict]:
     try:
         return _warehouse_strict().latest_quality_summary(limit=limit)
+    except LakeMetadataUnavailableError as err:
+        raise HTTPException(status_code=503, detail=str(err))
+
+
+# v1.5 只读接口
+
+
+@app.get("/etl/perf")
+def etl_perf(
+    dataset_id: str | None = None,
+    version: str | None = None,
+    phase: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+) -> list[dict]:
+    try:
+        return _warehouse_strict().list_etl_perf_runs(
+            dataset_id=dataset_id,
+            version=version,
+            phase=phase,
+            status=status,
+            limit=limit,
+        )
+    except LakeMetadataUnavailableError as err:
+        raise HTTPException(status_code=503, detail=str(err))
+
+
+@app.get("/etl/shards")
+def etl_shards(
+    plan_id: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+) -> list[dict]:
+    try:
+        return _warehouse_strict().list_etl_shards(plan_id=plan_id, status=status, limit=limit)
+    except LakeMetadataUnavailableError as err:
+        raise HTTPException(status_code=503, detail=str(err))
+
+
+@app.get("/benchmark/runs")
+def benchmark_runs(limit: int = 100) -> list[dict]:
+    try:
+        return _warehouse_strict().list_benchmark_runs(limit=limit)
+    except LakeMetadataUnavailableError as err:
+        raise HTTPException(status_code=503, detail=str(err))
+
+
+@app.get("/benchmark/runs/{benchmark_id}")
+def benchmark_run_detail(benchmark_id: str) -> dict:
+    try:
+        payload = _warehouse_strict().get_benchmark_run(benchmark_id)
+    except LakeMetadataUnavailableError as err:
+        raise HTTPException(status_code=503, detail=str(err))
+    if payload is None:
+        raise HTTPException(status_code=404, detail=f"benchmark not found: {benchmark_id}")
+    return payload
+
+
+@app.get("/events")
+def runtime_events(
+    event_type: str | None = None,
+    run_id: str | None = None,
+    job_id: str | None = None,
+    limit: int = 100,
+) -> list[dict]:
+    try:
+        return _warehouse_strict().list_runtime_events(
+            event_type=event_type,
+            run_id=run_id,
+            job_id=job_id,
+            limit=limit,
+        )
     except LakeMetadataUnavailableError as err:
         raise HTTPException(status_code=503, detail=str(err))

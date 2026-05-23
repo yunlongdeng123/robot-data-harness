@@ -1,0 +1,384 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: robot-dh-scale-etl
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: v1-5-argo
+    role: scale-etl
+spec:
+  serviceAccountName: robot-dh-workflow
+  entrypoint: main
+  ttlStrategy:
+    secondsAfterCompletion: 86400
+    secondsAfterFailure: 172800
+    secondsAfterSuccess: 86400
+  podGC:
+    strategy: OnWorkflowSuccess
+  activeDeadlineSeconds: 43200
+  podSpecPatch: |
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      fsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+  arguments:
+    parameters:
+      - name: root_uri
+        value: "s3://robot-datasets/raw"
+      - name: lake_root
+        value: "s3://robot-lake"
+      - name: include_pattern
+        value: "*scale30*"
+      - name: exclude_pattern
+        value: "*bridgedata_v2_scale30*"
+      - name: target_shard_size_gb
+        value: "5"
+      - name: max_workers
+        value: "2"
+      - name: max_shards
+        value: "3"
+  templates:
+    - name: main
+      dag:
+        tasks:
+          - name: plan
+            template: etl-plan
+            arguments:
+              parameters:
+                - name: root_uri
+                  value: "{{workflow.parameters.root_uri}}"
+                - name: lake_root
+                  value: "{{workflow.parameters.lake_root}}"
+                - name: include_pattern
+                  value: "{{workflow.parameters.include_pattern}}"
+                - name: exclude_pattern
+                  value: "{{workflow.parameters.exclude_pattern}}"
+                - name: target_shard_size_gb
+                  value: "{{workflow.parameters.target_shard_size_gb}}"
+                - name: max_shards
+                  value: "{{workflow.parameters.max_shards}}"
+          - name: run-shard-0
+            depends: "plan"
+            template: etl-run-shard
+            arguments:
+              parameters:
+                - name: shard_id
+                  value: "0"
+                - name: max_workers
+                  value: "{{workflow.parameters.max_workers}}"
+                - name: lake_root
+                  value: "{{workflow.parameters.lake_root}}"
+          - name: run-shard-1
+            depends: "plan"
+            template: etl-run-shard
+            arguments:
+              parameters:
+                - name: shard_id
+                  value: "1"
+                - name: max_workers
+                  value: "{{workflow.parameters.max_workers}}"
+                - name: lake_root
+                  value: "{{workflow.parameters.lake_root}}"
+          - name: run-shard-2
+            depends: "plan"
+            template: etl-run-shard
+            arguments:
+              parameters:
+                - name: shard_id
+                  value: "2"
+                - name: max_workers
+                  value: "{{workflow.parameters.max_workers}}"
+                - name: lake_root
+                  value: "{{workflow.parameters.lake_root}}"
+          - name: merge-summary
+            depends: "run-shard-0 && run-shard-1 && run-shard-2"
+            template: etl-merge-summary
+            arguments:
+              parameters:
+                - name: lake_root
+                  value: "{{workflow.parameters.lake_root}}"
+          - name: build-ads
+            depends: "merge-summary"
+            template: build-ads
+            arguments:
+              parameters:
+                - name: lake_root
+                  value: "{{workflow.parameters.lake_root}}"
+          - name: publish-event
+            depends: "build-ads"
+            template: publish-event
+
+    - name: etl-plan
+      inputs:
+        parameters:
+          - name: root_uri
+          - name: lake_root
+          - name: include_pattern
+          - name: exclude_pattern
+          - name: target_shard_size_gb
+          - name: max_shards
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        envFrom:
+          - secretRef:
+              name: robot-dh-v1-5-secrets
+              optional: false
+          - configMapRef:
+              name: robot-dh-v1-5-config
+              optional: true
+        env:
+          - name: ARGO_WORKFLOW_NAME
+            value: "{{workflow.name}}"
+          - name: PLAN_URI
+            value: "{{inputs.parameters.lake_root}}/tmp/{{workflow.name}}/scale30_plan.json"
+          - name: HOME
+            value: "/tmp"
+          - name: XDG_CACHE_HOME
+            value: "/tmp/.cache"
+          - name: MPLCONFIGDIR
+            value: "/tmp/matplotlib"
+          - name: ROBOT_DH_EVENTS_DIR
+            value: "/tmp/robot-dh/events"
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            set -euo pipefail
+            echo "{\"event\":\"argo_step_started\",\"step\":\"etl-plan\",\"workflow\":\"${ARGO_WORKFLOW_NAME}\"}"
+            robot-dh etl plan \
+              --root "{{inputs.parameters.root_uri}}" \
+              --lake-root "{{inputs.parameters.lake_root}}" \
+              --include "{{inputs.parameters.include_pattern}}" \
+              --exclude "{{inputs.parameters.exclude_pattern}}" \
+              --target-shard-size-gb "{{inputs.parameters.target_shard_size_gb}}" \
+              --max-shards "{{inputs.parameters.max_shards}}" \
+              --output "${PLAN_URI}" \
+              --log-format json
+            echo "{\"event\":\"argo_step_finished\",\"step\":\"etl-plan\",\"workflow\":\"${ARGO_WORKFLOW_NAME}\",\"plan_uri\":\"${PLAN_URI}\"}"
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "1"
+            memory: "2Gi"
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+
+    - name: etl-run-shard
+      inputs:
+        parameters:
+          - name: shard_id
+          - name: max_workers
+          - name: lake_root
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        envFrom:
+          - secretRef:
+              name: robot-dh-v1-5-secrets
+              optional: false
+          - configMapRef:
+              name: robot-dh-v1-5-config
+              optional: true
+        env:
+          - name: ARGO_WORKFLOW_NAME
+            value: "{{workflow.name}}"
+          - name: PLAN_URI
+            value: "{{inputs.parameters.lake_root}}/tmp/{{workflow.name}}/scale30_plan.json"
+          - name: SHARD_SUMMARY_URI
+            value: "{{inputs.parameters.lake_root}}/tmp/{{workflow.name}}/shards/shard_{{inputs.parameters.shard_id}}/shard_summary.json"
+          - name: HOME
+            value: "/tmp"
+          - name: XDG_CACHE_HOME
+            value: "/tmp/.cache"
+          - name: MPLCONFIGDIR
+            value: "/tmp/matplotlib"
+          - name: ROBOT_DH_EVENTS_DIR
+            value: "/tmp/robot-dh/events"
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            set -euo pipefail
+            echo "{\"event\":\"argo_step_started\",\"step\":\"run-shard-{{inputs.parameters.shard_id}}\",\"workflow\":\"${ARGO_WORKFLOW_NAME}\"}"
+            mkdir -p /workspace/shards/shard_{{inputs.parameters.shard_id}}
+            robot-dh etl run-shard \
+              --plan "${PLAN_URI}" \
+              --shard-id "{{inputs.parameters.shard_id}}" \
+              --lake-root "{{inputs.parameters.lake_root}}" \
+              --output /workspace/shards/shard_{{inputs.parameters.shard_id}} \
+              --summary-uri "${SHARD_SUMMARY_URI}" \
+              --max-workers "{{inputs.parameters.max_workers}}" \
+              --log-format json
+            echo "{\"event\":\"argo_step_finished\",\"step\":\"run-shard-{{inputs.parameters.shard_id}}\",\"workflow\":\"${ARGO_WORKFLOW_NAME}\"}"
+        resources:
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+          limits:
+            cpu: "2"
+            memory: "4Gi"
+        volumeMounts:
+          - name: workspace
+            mountPath: /workspace
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+      volumes:
+        - name: workspace
+          emptyDir: {}
+
+    - name: etl-merge-summary
+      inputs:
+        parameters:
+          - name: lake_root
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        envFrom:
+          - secretRef:
+              name: robot-dh-v1-5-secrets
+              optional: false
+          - configMapRef:
+              name: robot-dh-v1-5-config
+              optional: true
+        env:
+          - name: ARGO_WORKFLOW_NAME
+            value: "{{workflow.name}}"
+          - name: PLAN_URI
+            value: "{{inputs.parameters.lake_root}}/tmp/{{workflow.name}}/scale30_plan.json"
+          - name: SHARD_RESULT_PREFIX
+            value: "{{inputs.parameters.lake_root}}/tmp/{{workflow.name}}/shards"
+          - name: SUMMARY_URI
+            value: "{{inputs.parameters.lake_root}}/tmp/{{workflow.name}}/scale30_summary.json"
+          - name: HOME
+            value: "/tmp"
+          - name: XDG_CACHE_HOME
+            value: "/tmp/.cache"
+          - name: MPLCONFIGDIR
+            value: "/tmp/matplotlib"
+          - name: ROBOT_DH_EVENTS_DIR
+            value: "/tmp/robot-dh/events"
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            set -euo pipefail
+            echo "{\"event\":\"argo_step_started\",\"step\":\"merge-summary\",\"workflow\":\"${ARGO_WORKFLOW_NAME}\"}"
+            robot-dh etl merge-summary \
+              --plan "${PLAN_URI}" \
+              --shard-results "${SHARD_RESULT_PREFIX}" \
+              --output "${SUMMARY_URI}" \
+              --log-format json
+            echo "{\"event\":\"argo_step_finished\",\"step\":\"merge-summary\",\"workflow\":\"${ARGO_WORKFLOW_NAME}\",\"summary_uri\":\"${SUMMARY_URI}\"}"
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "512Mi"
+          limits:
+            cpu: "500m"
+            memory: "1Gi"
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+
+    - name: build-ads
+      inputs:
+        parameters:
+          - name: lake_root
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        envFrom:
+          - secretRef:
+              name: robot-dh-v1-5-secrets
+              optional: false
+          - configMapRef:
+              name: robot-dh-v1-5-config
+              optional: true
+        env:
+          - name: ARGO_WORKFLOW_NAME
+            value: "{{workflow.name}}"
+          - name: HOME
+            value: "/tmp"
+          - name: XDG_CACHE_HOME
+            value: "/tmp/.cache"
+          - name: MPLCONFIGDIR
+            value: "/tmp/matplotlib"
+          - name: ROBOT_DH_EVENTS_DIR
+            value: "/tmp/robot-dh/events"
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            set -euo pipefail
+            echo "{\"event\":\"argo_step_started\",\"step\":\"build-ads\",\"workflow\":\"${ARGO_WORKFLOW_NAME}\"}"
+            robot-dh build-ads \
+              --input-root "{{inputs.parameters.lake_root}}/dwd" \
+              --output "{{inputs.parameters.lake_root}}/ads/quality" \
+              --lake-root "{{inputs.parameters.lake_root}}" \
+              --log-format json
+            echo "{\"event\":\"argo_step_finished\",\"step\":\"build-ads\",\"workflow\":\"${ARGO_WORKFLOW_NAME}\"}"
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "1"
+            memory: "2Gi"
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+
+    - name: publish-event
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        envFrom:
+          - secretRef:
+              name: robot-dh-v1-5-secrets
+              optional: false
+          - configMapRef:
+              name: robot-dh-v1-5-config
+              optional: true
+        env:
+          - name: ARGO_WORKFLOW_NAME
+            value: "{{workflow.name}}"
+          - name: WORKFLOW_STATUS
+            value: "OK"
+          - name: HOME
+            value: "/tmp"
+          - name: XDG_CACHE_HOME
+            value: "/tmp/.cache"
+          - name: MPLCONFIGDIR
+            value: "/tmp/matplotlib"
+          - name: ROBOT_DH_EVENTS_DIR
+            value: "/tmp/robot-dh/events"
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            set -euo pipefail
+            echo "{\"event\":\"argo_workflow_finished\",\"workflow\":\"${ARGO_WORKFLOW_NAME}\",\"status\":\"${WORKFLOW_STATUS}\"}"
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+          limits:
+            cpu: "200m"
+            memory: "128Mi"
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]

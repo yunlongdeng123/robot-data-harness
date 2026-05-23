@@ -1,0 +1,240 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: robot-dh-benchmark
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: v1-5-argo
+    role: benchmark
+spec:
+  serviceAccountName: robot-dh-workflow
+  entrypoint: main
+  ttlStrategy:
+    secondsAfterCompletion: 86400
+    secondsAfterFailure: 172800
+    secondsAfterSuccess: 86400
+  podGC:
+    strategy: OnWorkflowSuccess
+  activeDeadlineSeconds: 3600
+  podSpecPatch: |
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      fsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+  arguments:
+    parameters:
+      - name: benchmark_suite
+        value: "configs/benchmark_suite.yaml"
+      - name: dataset_dir
+        value: "samples/button_press_001"
+      - name: report_dir
+        value: "runs/benchmark/v1_5"
+      - name: lake_root
+        value: "s3://robot-lake"
+  templates:
+    - name: main
+      dag:
+        tasks:
+          - name: prepare-demo
+            template: prepare-demo
+          - name: run-benchmark
+            depends: "prepare-demo"
+            template: run-benchmark
+            arguments:
+              parameters:
+                - name: dataset_dir
+                  value: "{{workflow.parameters.dataset_dir}}"
+                - name: benchmark_suite
+                  value: "{{workflow.parameters.benchmark_suite}}"
+                - name: report_dir
+                  value: "{{workflow.parameters.report_dir}}"
+          - name: publish-benchmark-report
+            depends: "run-benchmark"
+            template: publish-report
+            arguments:
+              parameters:
+                - name: report_dir
+                  value: "{{workflow.parameters.report_dir}}"
+                - name: lake_root
+                  value: "{{workflow.parameters.lake_root}}"
+
+    - name: prepare-demo
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        envFrom:
+          - configMapRef:
+              name: robot-dh-v1-5-config
+              optional: true
+        env:
+          - name: ARGO_WORKFLOW_NAME
+            value: "{{workflow.name}}"
+          - name: HOME
+            value: "/workspace"
+          - name: XDG_CACHE_HOME
+            value: "/tmp/.cache"
+          - name: MPLCONFIGDIR
+            value: "/tmp/matplotlib"
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            set -euo pipefail
+            echo "{\"event\":\"argo_step_started\",\"step\":\"prepare-demo\",\"workflow\":\"${ARGO_WORKFLOW_NAME}\"}"
+            mkdir -p {{workflow.parameters.dataset_dir}}
+            robot-dh generate-demo --output {{workflow.parameters.dataset_dir}} \
+              --duration-sec 46 --fps 30 --num-buttons 5 --num-presses 25
+            echo "{\"event\":\"argo_step_finished\",\"step\":\"prepare-demo\",\"workflow\":\"${ARGO_WORKFLOW_NAME}\"}"
+        volumeMounts:
+          - name: workspace
+            mountPath: /workspace
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+      volumes:
+        - name: workspace
+          emptyDir: {}
+
+    - name: run-benchmark
+      inputs:
+        parameters:
+          - name: dataset_dir
+          - name: benchmark_suite
+          - name: report_dir
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        envFrom:
+          - secretRef:
+              name: robot-dh-v1-5-secrets
+              optional: true
+          - configMapRef:
+              name: robot-dh-v1-5-config
+              optional: true
+        env:
+          - name: ARGO_WORKFLOW_NAME
+            value: "{{workflow.name}}"
+          - name: HOME
+            value: "/workspace"
+          - name: XDG_CACHE_HOME
+            value: "/tmp/.cache"
+          - name: MPLCONFIGDIR
+            value: "/tmp/matplotlib"
+          - name: ROBOT_DH_ARTIFACT_STORE
+            value: "local"
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            set -euo pipefail
+            echo "{\"event\":\"argo_step_started\",\"step\":\"run-benchmark\",\"workflow\":\"${ARGO_WORKFLOW_NAME}\"}"
+            robot-dh generate-demo --output {{inputs.parameters.dataset_dir}} \
+              --duration-sec 46 --fps 30 --num-buttons 5 --num-presses 25
+            python - <<'PY'
+            from pathlib import Path
+            import yaml
+
+            suite = yaml.safe_load(Path("configs/benchmark_suite.yaml").read_text())
+            for case in suite.get("cases", []):
+                if case.get("dataset") == "samples/button_press_001":
+                    case["dataset"] = "{{inputs.parameters.dataset_dir}}"
+                if case.get("source_dataset") == "samples/button_press_001":
+                    case["source_dataset"] = "{{inputs.parameters.dataset_dir}}"
+            Path("/workspace/benchmark_suite.yaml").write_text(
+                yaml.safe_dump(suite, sort_keys=False, allow_unicode=True),
+                encoding="utf-8",
+            )
+            PY
+            mkdir -p {{inputs.parameters.report_dir}}
+            robot-dh benchmark run \
+              --suite /workspace/benchmark_suite.yaml \
+              --output {{inputs.parameters.report_dir}} \
+              --record-to-registry \
+              --log-format json
+            echo "{\"event\":\"argo_step_finished\",\"step\":\"run-benchmark\",\"workflow\":\"${ARGO_WORKFLOW_NAME}\"}"
+        volumeMounts:
+          - name: workspace
+            mountPath: /workspace
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "2"
+            memory: "2Gi"
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+      volumes:
+        - name: workspace
+          emptyDir: {}
+
+    - name: publish-report
+      inputs:
+        parameters:
+          - name: report_dir
+          - name: lake_root
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        envFrom:
+          - secretRef:
+              name: robot-dh-v1-5-secrets
+              optional: true
+          - configMapRef:
+              name: robot-dh-v1-5-config
+              optional: true
+        env:
+          - name: ARGO_WORKFLOW_NAME
+            value: "{{workflow.name}}"
+          - name: HOME
+            value: "/workspace"
+          - name: XDG_CACHE_HOME
+            value: "/tmp/.cache"
+          - name: MPLCONFIGDIR
+            value: "/tmp/matplotlib"
+          - name: ROBOT_DH_ARTIFACT_STORE
+            value: "local"
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            set -euo pipefail
+            echo "{\"event\":\"argo_step_started\",\"step\":\"publish-benchmark-report\",\"workflow\":\"${ARGO_WORKFLOW_NAME}\"}"
+            if [ -f "{{inputs.parameters.report_dir}}/benchmark_report.json" ]; then
+              robot-dh benchmark report --benchmark-dir {{inputs.parameters.report_dir}} \
+                | tee /tmp/benchmark_summary.md
+            else
+              echo "{\"event\":\"benchmark_report_unavailable\",\"reason\":\"report_dir_not_shared_between_pods\",\"benchmark_dir\":\"{{inputs.parameters.report_dir}}\"}"
+            fi
+            echo "{\"event\":\"argo_step_finished\",\"step\":\"publish-benchmark-report\",\"workflow\":\"${ARGO_WORKFLOW_NAME}\"}"
+        volumeMounts:
+          - name: workspace
+            mountPath: /workspace
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "200m"
+            memory: "512Mi"
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+      volumes:
+        - name: workspace
+          emptyDir: {}

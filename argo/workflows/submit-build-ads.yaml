@@ -1,0 +1,21 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: robot-dh-build-ads-
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: v1-5-argo
+    role: build-ads
+    template: robot-dh-build-ads
+spec:
+  workflowTemplateRef:
+    name: robot-dh-build-ads
+  arguments:
+    parameters:
+      - name: input_root
+        value: "s3://robot-lake/dwd"
+      - name: output_uri
+        value: "s3://robot-lake/ads/quality"
+      - name: lake_root
+        value: "s3://robot-lake"

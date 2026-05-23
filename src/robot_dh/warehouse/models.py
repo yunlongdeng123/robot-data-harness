@@ -17,6 +17,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     Engine,
     Float,
@@ -149,6 +150,157 @@ class QualitySnapshotRow(WarehouseBase):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
 
+# v1.5 新增表：scale benchmark + sharded etl + runtime profiling
+
+
+class EtlPerfRunRow(WarehouseBase):
+    __tablename__ = "etl_perf_runs"
+    __table_args__ = (
+        Index("idx_etl_perf_runs_phase_status", "phase", "status"),
+        Index("idx_etl_perf_runs_dataset_version", "dataset_id", "version"),
+        Index("idx_etl_perf_runs_run_id", "run_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigSerial, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(Text, nullable=False)
+    run_id: Mapped[str] = mapped_column(Text, nullable=False)
+    dataset_id: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    phase: Mapped[str] = mapped_column(Text, nullable=False)
+    input_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    input_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    output_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    input_rows: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    output_rows: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    download_duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    upload_duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    compute_duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    peak_memory_mb: Mapped[float | None] = mapped_column(Float, nullable=True)
+    worker_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="OK")
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    metrics_json: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class EtlShardRow(WarehouseBase):
+    __tablename__ = "etl_shards"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "shard_id", name="etl_shards_plan_shard_key"),
+        Index("idx_etl_shards_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(BigSerial, primary_key=True, autoincrement=True)
+    plan_id: Mapped[str] = mapped_column(Text, nullable=False)
+    shard_id: Mapped[str] = mapped_column(Text, nullable=False)
+    shard_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    dataset_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="PENDING")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    succeeded: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    failed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    skipped: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    summary_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metrics_json: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class BenchmarkRunRow(WarehouseBase):
+    __tablename__ = "benchmark_runs"
+    __table_args__ = (
+        Index("idx_benchmark_runs_suite_status", "suite_name", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(BigSerial, primary_key=True, autoincrement=True)
+    benchmark_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    suite_name: Mapped[str] = mapped_column(Text, nullable=False)
+    suite_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    total_cases: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    passed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    failed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mismatched: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="RUNNING")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    report_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metrics_json: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class BenchmarkCaseRow(WarehouseBase):
+    __tablename__ = "benchmark_cases"
+    __table_args__ = (
+        Index("idx_benchmark_cases_benchmark_case", "benchmark_id", "case_id"),
+        Index("idx_benchmark_cases_benchmark_match", "benchmark_id", "match"),
+        UniqueConstraint("benchmark_id", "case_id", name="uq_benchmark_cases_benchmark_case"),
+    )
+
+    id: Mapped[int] = mapped_column(BigSerial, primary_key=True, autoincrement=True)
+    benchmark_id: Mapped[str] = mapped_column(Text, nullable=False)
+    case_id: Mapped[str] = mapped_column(Text, nullable=False)
+    dataset_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mutation_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mutation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expected_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    actual_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expected_failed_validators: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    actual_failed_validators: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    match: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metrics_json: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    artifacts_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class RuntimeEventRow(WarehouseBase):
+    __tablename__ = "runtime_events"
+    __table_args__ = (
+        Index("idx_runtime_events_event_type_created_at", "event_type", "created_at"),
+        Index("idx_runtime_events_run_id", "run_id"),
+        Index("idx_runtime_events_job_id", "job_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigSerial, primary_key=True, autoincrement=True)
+    event_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    job_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dataset_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload_json: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class ArgoWorkflowRow(WarehouseBase):
+    """v1.5 Argo workflow 元数据；非强制 schema，本仓库的写入路径主要在 CLI 与 exporter 读取。"""
+
+    __tablename__ = "argo_workflow_runs"
+    __table_args__ = (
+        Index("idx_argo_workflow_runs_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(BigSerial, primary_key=True, autoincrement=True)
+    workflow_name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    workflow_template: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    metrics_json: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
 def ensure_lake_tables(engine: Engine) -> None:
-    """若不存在则创建 v1.4 元数据表；生产 Postgres 通常已有，checkfirst 保证幂等；SQLite 测试依赖此建表。"""
+    """若不存在则创建 v1.4 + v1.5 元数据表；生产 Postgres 通常已有，checkfirst 保证幂等；SQLite 测试依赖此建表。"""
     WarehouseBase.metadata.create_all(engine, checkfirst=True)

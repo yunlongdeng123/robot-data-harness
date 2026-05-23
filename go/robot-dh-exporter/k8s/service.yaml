@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: robot-dh-exporter
+  namespace: robot-dh
+  labels:
+    app: robot-dh-exporter
+    component: v1-5-exporter
+spec:
+  type: ClusterIP
+  selector:
+    app: robot-dh-exporter
+  ports:
+    - name: metrics
+      port: 9108
+      targetPort: metrics
+      protocol: TCP

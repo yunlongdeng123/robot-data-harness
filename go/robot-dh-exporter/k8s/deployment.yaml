@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: robot-dh-exporter
+  namespace: robot-dh
+  labels:
+    app: robot-dh-exporter
+    component: v1-5-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: robot-dh-exporter
+  template:
+    metadata:
+      labels:
+        app: robot-dh-exporter
+        component: v1-5-exporter
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9108"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: exporter
+          image: robot-dh-exporter:local
+          imagePullPolicy: IfNotPresent
+          args: []
+          envFrom:
+            - secretRef:
+                name: robot-dh-v1-5-secrets
+                optional: false
+          env:
+            - name: ROBOT_DH_DB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: robot-dh-v1-5-secrets
+                  key: ROBOT_DH_EXPORTER_DB_URI
+            - name: EXPORTER_ADDR
+              value: ":9108"
+            - name: SCRAPE_INTERVAL_SEC
+              value: "30"
+            - name: LOG_LEVEL
+              value: "info"
+          ports:
+            - name: metrics
+              containerPort: 9108
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9108
+            initialDelaySeconds: 2
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9108
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

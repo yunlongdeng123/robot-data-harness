@@ -1121,3 +1121,224 @@ make k8s-delete-lake-jobs   # 只删 jobs，不动 namespace / secret / debug po
 ### 接收侧交接物清单
 
 详见 `docs/v1_4_handoff_inbox.md`。本仓库针对 SSH 暂不可用时已经做了完整的"直连反查"补救，所有 v1.4 关键资产（env、SQL、policy、资产清单）都在仓库内有对应文件。SSH 恢复后用 `scripts/fetch_v1_4_handoff.sh` 拉云端权威版覆盖即可。
+
+## v1.5 Scale Benchmark + Sharded ETL + Runtime Profiling
+
+v1.5 在 v1.4 数据湖之上叠加四个能力，全部向后兼容、不破坏已有命令：
+
+1. **ETL Performance Profiler**：`robot_dh.perf.EtlProfiler` 记录 normalize / build-features / build-ads / etl_run / shard 各阶段的
+   `input_bytes / output_bytes / duration_sec / download_duration_sec / upload_duration_sec / compute_duration_sec /
+   peak_memory_mb / status`，并落到 PostgreSQL `etl_perf_runs`（缺表时仅 warning）。
+2. **Sharded ETL**：`robot-dh etl plan / run-shard / merge-summary` 三段命令，把 30GB 级 raw 数据装箱到多个 shard 并独立执行。
+3. **Scale Benchmark**：`robot-dh mutate` 注入 8 种异常 + `robot-dh benchmark run` 把 mutated dataset 喂给 validator，验证 quality gate 是否能识别预期失败。
+4. **Runtime Events**：`robot-dh.runtime.events.RuntimeEventLogger` 写本地 `runs/events/runtime_events_YYYYmmdd.jsonl` + 可选 `runtime_events` 表。
+
+### 本地 benchmark
+
+```
+make demo-data
+make benchmark-local
+# 等价：robot-dh benchmark run --suite configs/benchmark_suite.yaml --output runs/benchmark/v1_5
+```
+
+`benchmark_report.json` / `benchmark_report.md` / `benchmark_report.html` 同时落到输出目录；任何 case 不符合 `expected_status` /
+`expected_failed_validators` 时进程退出码非零。
+
+### scale30 远端 ETL（CLI）
+
+前置：`source client/robot-dh-v1-5.env` 之后 `ROBOT_DH_S3_*` / `ROBOT_DH_DB_URI` 等环境变量已就绪。
+
+```
+mkdir -p runs/plans runs/shards/scale30
+
+robot-dh etl plan \
+  --root s3://robot-datasets/raw \
+  --lake-root s3://robot-lake \
+  --include "*scale30*" \
+  --exclude "*bridgedata_v2_scale30*" \
+  --target-shard-size-gb 5 \
+  --max-shards 16 \
+  --output runs/plans/scale30_plan.json \
+  --log-format json
+
+robot-dh etl run-shard \
+  --plan runs/plans/scale30_plan.json \
+  --shard-id 0 \
+  --lake-root s3://robot-lake \
+  --output runs/shards/scale30/shard_0 \
+  --summary-uri runs/shards/scale30/shard_0/shard_summary.json \
+  --max-workers 2 \
+  --log-format json
+
+robot-dh etl merge-summary \
+  --plan runs/plans/scale30_plan.json \
+  --shard-results runs/shards/scale30 \
+  --output runs/plans/scale30_summary.json \
+  --log-format json
+```
+
+`etl plan` 与 `etl run-shard` 也支持 `s3://...` 路径作为 `--plan` / `--output`：在 Argo 中 plan 可以落到
+`s3://robot-lake/tmp/{workflow.name}/scale30_plan.json`，再被 `run-shard` step 直接读取，避免 Argo artifact repository 配置成本。
+
+### scale30 Argo 长任务（推荐 tmux）
+
+`robot-dh-scale-etl` 模板默认 `activeDeadlineSeconds: 43200`，即 12 小时。长任务不要放在 IDE 临时终端里等，推荐用 `tmux`：
+
+```
+tmux new -s robot-dh-scale-etl
+cd /home/yunlong/workspace/robot-data-harness
+
+source client/robot-dh-v1-5.env
+./scripts/k8s_create_v1_5_secret_from_env.sh
+
+make docker-build
+make kind-load
+make argo-install
+make argo-apply-rbac
+make argo-apply-templates
+
+wf=$(kubectl -n robot-dh create -f argo/workflows/submit-scale30-etl.yaml -o jsonpath='{.metadata.name}')
+echo "workflow=${wf}"
+
+TIMEOUT=43200 ./argo/scripts/argo_wait_workflow.sh "${wf}"
+```
+
+另开一个窗口持续观察 Pod：
+
+```
+tmux new -s robot-dh-scale-watch
+wf="robot-dh-scale30-etl-xxxxx"  # 替换为上一步输出的 workflow 名称
+kubectl -n robot-dh get pods -l workflows.argoproj.io/workflow="${wf}" -w
+```
+
+常用排查命令：
+
+```
+kubectl -n robot-dh get wf "${wf}" -o wide
+
+kubectl get wf -n robot-dh "${wf}" -o json \
+  | jq -r '.status.nodes | to_entries[] | select(.value.phase != "Succeeded" and .value.phase != "Skipped") | [.value.displayName,.value.type,.value.phase,(.value.message // ""),(.value.startedAt // ""),(.value.finishedAt // "")] | @tsv'
+
+kubectl -n robot-dh get pods -l workflows.argoproj.io/workflow="${wf}" -o wide
+kubectl -n robot-dh describe pod <pod-name>
+kubectl -n robot-dh logs -f <pod-name> -c main
+```
+
+历史事故与优化方向见 [`docs/v1_5_scale_etl_deadline_report.md`](./docs/v1_5_scale_etl_deadline_report.md)。
+
+### performance metrics 字段含义
+
+| 字段 | 含义 |
+| --- | --- |
+| `input_bytes` / `output_bytes` | 阶段输入 / 输出对象字节数（S3 / 本地 stat 累计） |
+| `input_rows` / `output_rows` | 阶段输入 / 输出 parquet 行数 |
+| `duration_sec` | 阶段 wall-clock 耗时 |
+| `download_duration_sec` | 显式标记的 S3 下载累计 |
+| `upload_duration_sec` | 显式标记的 S3 上传累计 |
+| `compute_duration_sec` | `duration_sec - download - upload`，纯计算时间 |
+| `peak_memory_mb` | 阶段内进程 RSS 峰值（psutil 后台采样） |
+
+### PostgreSQL 表（v1.5 新增）
+
+| 表 | 用途 |
+| --- | --- |
+| `etl_perf_runs` | 每阶段 PerfRecord |
+| `etl_shards` | 每个 shard 的 status / succeeded / failed / duration_sec |
+| `benchmark_runs` | 整次 benchmark 汇总 |
+| `benchmark_cases` | 每个 case 的 expected / actual / match |
+| `runtime_events` | runtime event 流水 |
+| `argo_workflow_runs` | 可选：Argo workflow 元数据（Prompt B 写入） |
+
+如果远端 v1.5 表不存在或仍是早期字段集，写入路径会提示 schema 缺失；API 严格模式下会返回 503。DDL 由 `robot-dh-infra` 维护，不在本仓库执行。补救入口：
+
+```
+# 远端 robot-dh-infra 项目中执行
+./scripts/29_pg_apply_v1_5_schema.sh
+./scripts/33_pg_apply_etl_shards_align.sh
+./scripts/34_pg_apply_benchmark_align.sh
+./scripts/30_pg_v1_5_smoke_test.sh
+```
+
+### CLI 新增命令一览
+
+```
+robot-dh etl plan ...
+robot-dh etl run-shard ...
+robot-dh etl merge-summary ...
+robot-dh mutate --dataset samples/button_press_001 --output runs/mutated/velocity --mutation velocity_spike
+robot-dh benchmark run --suite configs/benchmark_suite.yaml --output runs/benchmark/v1_5
+robot-dh benchmark report --benchmark-dir runs/benchmark/v1_5
+```
+
+所有 v1.5 命令支持 `--log-format human|json`；ETL 相关命令支持 `--max-workers / --work-dir / --tmp-dir / --fail-fast`。
+
+### API 新增只读端点
+
+| Method | Path | 用途 |
+| --- | --- | --- |
+| GET | `/etl/perf` | 过滤 dataset_id / version / phase / status 的 perf 记录 |
+| GET | `/etl/shards` | 过滤 plan_id / status 的 shard 状态 |
+| GET | `/benchmark/runs` | 列出 benchmark run |
+| GET | `/benchmark/runs/{benchmark_id}` | 单次 benchmark 详情（含每 case） |
+| GET | `/events` | runtime events 过滤 event_type / run_id / job_id |
+
+### Makefile target
+
+```
+make benchmark-local         # 本地端到端 benchmark
+make etl-plan-scale30        # 远端 plan
+make etl-run-shard-0         # 远端 shard 0
+make etl-merge-scale30       # 汇总 shard 结果
+make perf-query              # 列举常用 /etl/perf curl 示例
+make v1-5-smoke              # demo-data + benchmark-local 一键 smoke
+```
+
+### 常见故障
+
+| 现象 | 排查思路 |
+| --- | --- |
+| `v1.5 PostgreSQL tables missing` 或 `UndefinedColumn` | 远端 `robot-dh-infra` 没跑 `29` / `33` / `34` / `30`；本仓库只更新模型和写入逻辑，不负责 DDL |
+| `S3 endpoint 失败` | 检查 `ROBOT_DH_S3_*` 与 bucket 访问权限；kind Pod 内 endpoint **不能**用 WSL 的 127.0.0.1 SSH tunnel |
+| `scale30 prefix 发现不到` | 确认 `--include` glob 与 raw key 实际命名一致；可用 `robot-dh lake list --layer raw --include "*scale30*"` 反查 |
+| `pyarrow OOM` | 调高 K8s `resources.limits.memory`，或拆细 `--target-shard-size-gb` |
+| `DeadlineExceeded` / `exit status 143` | Argo deadline 到期杀掉 Pod；scale ETL 默认 12 小时，仍超时则看 normalize 内部吞吐和资源瓶颈 |
+| `benchmark expected_failed_validators 不匹配` | 检查 `configs/button_press.yaml` 与 demo dataset 是否同步；本地用 46s / 30fps 重新生成 demo |
+| `shard 某些 dataset 失败` | `shard_summary.json` 中 `runs[].error_message`；可单独 `robot-dh etl run --dataset ...` 复现 |
+
+### Argo Workflows（kind / K8s）
+
+v1.5 把上述 CLI 编排成 Argo Workflows：
+
+- WorkflowTemplate：`robot-dh-scale-etl`、`robot-dh-benchmark`、`robot-dh-build-ads`
+- CronWorkflow：`robot-dh-scale-etl-cron`（12h 一次）
+- scale ETL deadline：`activeDeadlineSeconds: 43200`（12 小时）
+- RBAC + ConfigMap + Secret 示例：`k8s/v1_5_argo/`
+- 跨 step 用 S3 URI 传 plan / shard summary，避免 Argo artifact repository 配置成本
+
+具体目录与上线流程见 [`argo/README.md`](./argo/README.md) 与 [`docs/v1_5_argo_workflow.md`](./docs/v1_5_argo_workflow.md)。常用 Make target：
+
+```
+make argo-install
+make argo-apply-rbac
+make argo-apply-templates
+make argo-submit-scale-etl
+make argo-submit-benchmark
+make argo-submit-build-ads
+make argo-apply-cron
+make argo-list
+make argo-logs
+make argo-delete-completed
+```
+
+### Prometheus exporter (Go)
+
+v1.5 同步引入了独立的 Go exporter `robot-dh-exporter`：读取 PostgreSQL 中的元数据并暴露 Prometheus 指标。详见 [`go/robot-dh-exporter/README.md`](./go/robot-dh-exporter/README.md)。常用 Makefile target：
+
+```
+make exporter-test           # go test ./...
+make exporter-docker-build   # 构建 robot-dh-exporter:local
+make exporter-kind-load
+make exporter-k8s-apply
+make exporter-port-forward
+curl http://localhost:9108/metrics | grep robot_dh
+```
