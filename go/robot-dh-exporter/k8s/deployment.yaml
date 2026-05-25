@@ -5,7 +5,7 @@ metadata:
   namespace: robot-dh
   labels:
     app: robot-dh-exporter
-    component: v1-5-exporter
+    component: v1-6-exporter
 spec:
   replicas: 1
   selector:
@@ -15,7 +15,7 @@ spec:
     metadata:
       labels:
         app: robot-dh-exporter
-        component: v1-5-exporter
+        component: v1-6-exporter
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "9108"
@@ -34,13 +34,13 @@ spec:
           args: []
           envFrom:
             - secretRef:
-                name: robot-dh-v1-5-secrets
+                name: robot-dh-v1-6-secrets
                 optional: false
           env:
             - name: ROBOT_DH_DB_URI
               valueFrom:
                 secretKeyRef:
-                  name: robot-dh-v1-5-secrets
+                  name: robot-dh-v1-6-secrets
                   key: ROBOT_DH_EXPORTER_DB_URI
             - name: EXPORTER_ADDR
               value: ":9108"

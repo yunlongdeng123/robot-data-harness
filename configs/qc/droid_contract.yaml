@@ -1,0 +1,30 @@
+contract_id: droid_multimodal_v1
+dataset_family: droid
+version: v1
+description: DROID / LeRobot 风格 parquet + video 检查
+rules:
+  - rule_id: num_parquet_files_min
+    metric: num_parquet_files
+    op: ">="
+    threshold: 1
+    severity: fail
+  - rule_id: parquet_valid_rate
+    metric: parquet_valid_rate
+    op: ">="
+    threshold: 0.95
+    severity: warn
+  - rule_id: video_decode_pass_rate
+    metric: video_decode_pass_rate
+    op: ">="
+    threshold: 0.95
+    severity: warn
+  - rule_id: action_column_coverage
+    metric: action_column_coverage
+    op: ">"
+    threshold: 0.0
+    severity: fail
+  - rule_id: timestamp_monotonic_rate
+    metric: timestamp_monotonic_rate
+    op: ">="
+    threshold: 0.95
+    severity: warn

@@ -5,7 +5,7 @@ metadata:
   namespace: robot-dh
   labels:
     app: robot-dh-exporter
-    component: v1-5-exporter
+    component: v1-6-exporter
 spec:
   type: ClusterIP
   selector:

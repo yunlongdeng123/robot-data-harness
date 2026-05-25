@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "robot-data-harness"
-version = "0.1.5"
-description = "面向 Kubernetes 的机器人数据质量与评测框架（Robot Data Harness），含 v1.4 数据湖 + v1.5 Scale Benchmark / Sharded ETL"
+version = "0.1.6"
+description = "面向 Kubernetes 的机器人数据质量与评测框架（Robot Data Harness），覆盖数据湖、Scale ETL、多源 QC contract、ML-ready 导出、Argo 多源 DAG 与 Prometheus exporter"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

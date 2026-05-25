@@ -1,0 +1,30 @@
+contract_id: robomimic_hdf5_v1
+dataset_family: robomimic
+version: v1
+description: robomimic HDF5 group 结构与 demo 字段
+rules:
+  - rule_id: hdf5_valid_rate
+    metric: hdf5_valid_rate
+    op: ">="
+    threshold: 0.95
+    severity: fail
+  - rule_id: demo_count_min
+    metric: demo_count
+    op: ">="
+    threshold: 1
+    severity: fail
+  - rule_id: action_present_rate
+    metric: action_present_rate
+    op: ">="
+    threshold: 0.95
+    severity: warn
+  - rule_id: obs_next_obs_mismatch_rate
+    metric: obs_next_obs_mismatch_rate
+    op: "<="
+    threshold: 0.05
+    severity: warn
+  - rule_id: reward_done_length_mismatch_rate
+    metric: reward_done_length_mismatch_rate
+    op: "<="
+    threshold: 0.05
+    severity: warn

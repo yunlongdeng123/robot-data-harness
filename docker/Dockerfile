@@ -1,7 +1,13 @@
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    HOME=/tmp \
+    MPLCONFIGDIR=/tmp/.matplotlib \
+    XDG_CACHE_HOME=/tmp/.cache \
+    XDG_CONFIG_HOME=/tmp/.config \
+    FONTCONFIG_PATH=/etc/fonts \
+    ROBOT_DH_EVENTS_DIR=/tmp/robot-dh/events
 
 # 国内镜像源默认（阿里云），加速 PyPI + PyTorch CPU wheel 下载。
 # 海外环境 / CI 可通过 --build-arg 覆盖回官方源，例如:
@@ -28,7 +34,9 @@ RUN apt-get update \
         libgl1 \
         libsm6 \
         libxext6 \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /tmp/.matplotlib /tmp/.cache /tmp/.config /tmp/.cache/fontconfig /tmp/robot-dh/events \
+    && chmod -R 1777 /tmp/.matplotlib /tmp/.cache /tmp/.config /tmp/robot-dh
 
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir \

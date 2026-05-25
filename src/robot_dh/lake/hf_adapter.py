@@ -57,8 +57,11 @@ def load_huggingface_dataset(
 ) -> list[DatasetBundle]:
     """从 HuggingFace 风格快照加载一个或多个 pose episode。
 
-    策略偏保守：优先显式 7D pose 列，再回退 ``observation.state``、``action`` 等常见向量列；
-    仍无法识别时抛错，提示需专用 mapper。
+    策略：
+    1. 先查 ``hf_adapters`` 注册表（按 dataset_id 精确 / 前缀匹配），命中则直接用；
+       BridgeData V2 等已知 OXE 子集走这条路径，避免落到启发式扫列出现误判。
+    2. fallback：用启发式扫显式 7D pose 列、再回退 ``observation.state``、``action`` 等
+       常见向量列；仍无法识别时抛 ValueError 并打印 dry-run schema 诊断。
     """
 
     dataset_dir = dataset_dir.expanduser().resolve()
@@ -69,6 +72,26 @@ def load_huggingface_dataset(
     resolved_dataset_id = dataset_id or str(meta.get("dataset_id") or dataset_dir.name)
     resolved_version = version or str(meta.get("version") or meta.get("dataset_version") or "v1")
 
+    # 1) 显式 adapter
+    from robot_dh.lake.hf_adapters import AdapterContext, adapt_via_registry
+
+    registry_episodes = adapt_via_registry(
+        AdapterContext(
+            dataset_dir=dataset_dir,
+            dataset_id=resolved_dataset_id,
+            version=resolved_version,
+            base_meta=meta,
+        )
+    )
+    if registry_episodes is not None:
+        if not registry_episodes:
+            raise ValueError(
+                f"hf_adapter[{resolved_dataset_id}]: registered adapter returned 0 episodes "
+                f"for {dataset_dir}; check adapter logic"
+            )
+        return registry_episodes
+
+    # 2) 启发式 fallback
     episodes: list[DatasetBundle] = []
     for path in _iter_data_files(dataset_dir):
         if path.suffix.lower() == PARQUET_SUFFIX:
@@ -94,12 +117,37 @@ def load_huggingface_dataset(
 
     if not episodes:
         candidates = ", ".join(p.relative_to(dataset_dir).as_posix() for p in _iter_data_files(dataset_dir))
+        observed_schemas = _peek_parquet_schemas(dataset_dir, limit=2)
         raise ValueError(
             "Unable to extract pose episodes from HuggingFace-style dataset "
-            f"{dataset_dir}. Checked files: {candidates or '<none>'}. "
-            "Add an explicit adapter mapping for this dataset schema."
+            f"{dataset_dir} (dataset_id={resolved_dataset_id}). "
+            f"Checked files: {candidates or '<none>'}. "
+            f"Observed parquet column samples: {observed_schemas}. "
+            "Register an explicit adapter via `robot_dh.lake.hf_adapters.register_dataset_adapter` "
+            "or `from robot_dh.lake.hf_adapters import adapt_bridgedata_v2`."
         )
     return episodes
+
+
+def _peek_parquet_schemas(dataset_dir: Path, *, limit: int = 2) -> list[dict[str, list[str]]]:
+    """dry-run schema 探测；只读 footer，几 KB 网络。失败时返回空列表。"""
+    out: list[dict[str, list[str]]] = []
+    for path in _iter_data_files(dataset_dir):
+        if not path.suffix.lower() == PARQUET_SUFFIX:
+            continue
+        try:
+            schema = pq.read_schema(path)
+            out.append(
+                {
+                    "file": path.relative_to(dataset_dir).as_posix(),
+                    "columns": list(schema.names),
+                }
+            )
+        except Exception as err:  # noqa: BLE001
+            LOG.debug("peek schema failed for %s: %s", path, err)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _iter_data_files(dataset_dir: Path) -> Iterable[Path]:

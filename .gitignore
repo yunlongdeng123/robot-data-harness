@@ -47,3 +47,18 @@ client/remote_assets_*.json
 # Go exporter build artifacts
 go/robot-dh-exporter/bin/
 go/robot-dh-exporter/vendor/
+
+exyzxyzw/
+eexyzxyzw/
+
+# v1.6 实跑工件：archiveLogs dump / fhkvr-bundle / 调试目录，禁止入 git
+log_robot-dh-*/
+robot-dh-*-bundle/
+test_debug/
+
+# ---- platform secret 模板防护（仅 example 入 git）----
+# 真实凭据 env：禁止入 git
+client/robot-dh-platform.env
+# 真实 secret yaml：禁止入 git，但 example 模板允许
+client/k8s-platform-secret.yaml
+client/k8s-create-platform-secret.sh

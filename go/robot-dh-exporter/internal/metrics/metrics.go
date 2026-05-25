@@ -22,7 +22,12 @@ type Collector struct {
 	querier  *db.Querier
 	interval time.Duration
 
-	gauges *registeredGauges
+	gauges     *registeredGauges
+	gaugesPlat *platformGauges
+
+	lastScrape    time.Time
+	lastScrapeErr string
+	dbConnected   bool
 }
 
 type registeredGauges struct {
@@ -120,12 +125,32 @@ func MustRegister(reg prometheus.Registerer, querier *db.Querier, interval time.
 	} {
 		reg.MustRegister(c)
 	}
+	platGauges := registerPlatform(reg)
 	return &Collector{
-		logger:   logger,
-		querier:  querier,
-		interval: interval,
-		gauges:   g,
+		logger:     logger,
+		querier:    querier,
+		interval:   interval,
+		gauges:     g,
+		gaugesPlat: platGauges,
 	}
+}
+
+// Snapshot 返回当前 health 快照；供 server /healthz 调用。
+func (c *Collector) Snapshot() HealthSnapshot {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return HealthSnapshot{
+		DBConnected:     c.dbConnected,
+		LastScrapeTime:  c.lastScrape,
+		LastScrapeError: c.lastScrapeErr,
+	}
+}
+
+// HealthSnapshot 复述 server.HealthSnapshot 字段；避免 metrics 反向依赖 server 包。
+type HealthSnapshot struct {
+	DBConnected     bool
+	LastScrapeTime  time.Time
+	LastScrapeError string
 }
 
 // Start 启动后台周期刷新；调用方在 ctx 取消时应等待返回。
@@ -249,7 +274,21 @@ func (c *Collector) scrape(ctx context.Context) error {
 		ok = false
 	}
 
+	if !c.scrapePlatform(scrapeCtx) {
+		ok = false
+	}
 	c.gauges.scrapeDuration.Set(time.Since(start).Seconds())
+
+	c.mu.Lock()
+	c.lastScrape = time.Now()
+	c.dbConnected = c.querier != nil
+	if ok {
+		c.lastScrapeErr = ""
+	} else {
+		c.lastScrapeErr = "one or more table queries failed; see warn logs"
+	}
+	c.mu.Unlock()
+
 	if ok {
 		c.gauges.exporterUp.Set(1)
 		c.gauges.lastScrapeSec.Set(float64(time.Now().Unix()))

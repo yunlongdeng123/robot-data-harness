@@ -15,7 +15,7 @@ spec:
     secondsAfterFailure: 172800
     secondsAfterSuccess: 86400
   podGC:
-    strategy: OnWorkflowSuccess
+    strategy: OnWorkflowCompletion
   activeDeadlineSeconds: 43200
   podSpecPatch: |
     securityContext:

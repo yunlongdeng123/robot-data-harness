@@ -1,0 +1,25 @@
+contract_id: bridgedata_v2_v1
+dataset_family: bridge
+version: v1
+description: BridgeData V2 风格 parquet shard
+rules:
+  - rule_id: parquet_valid_rate
+    metric: parquet_valid_rate
+    op: ">="
+    threshold: 0.95
+    severity: warn
+  - rule_id: num_parquet_files_min
+    metric: num_parquet_files
+    op: ">="
+    threshold: 1
+    severity: fail
+  - rule_id: action_column_coverage
+    metric: action_column_coverage
+    op: ">"
+    threshold: 0.0
+    severity: warn
+  - rule_id: language_missing_rate
+    metric: language_missing_rate
+    op: "<="
+    threshold: 0.5
+    severity: warn

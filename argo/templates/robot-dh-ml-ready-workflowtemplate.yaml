@@ -1,0 +1,78 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: robot-dh-ml-ready-export
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: v1-6-argo
+    role: ml-ready
+spec:
+  serviceAccountName: robot-dh-workflow
+  entrypoint: main
+  ttlStrategy:
+    secondsAfterCompletion: 86400
+    secondsAfterFailure: 86400
+  podGC:
+    strategy: OnWorkflowCompletion
+  activeDeadlineSeconds: 14400
+  arguments:
+    parameters:
+      - name: lake_root
+        value: "s3://robot-lake"
+      - name: dataset_id
+        value: "scale30"
+      - name: version
+        value: "v1"
+      - name: quality_threshold
+        value: "80"
+      - name: split
+        value: "0.8,0.1,0.1"
+  templates:
+    - name: main
+      dag:
+        tasks:
+          - name: export
+            template: export
+    - name: export
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["robot-dh"]
+        args:
+          - "ml-ready"
+          - "export"
+          - "--input-root"
+          - "{{workflow.parameters.lake_root}}/dwd"
+          - "--quality-root"
+          - "{{workflow.parameters.lake_root}}/ads/quality"
+          - "--qc-root"
+          - "{{workflow.parameters.lake_root}}/qc"
+          - "--output"
+          - "{{workflow.parameters.lake_root}}/ml-ready/{{workflow.parameters.dataset_id}}/{{workflow.parameters.version}}"
+          - "--quality-threshold"
+          - "{{workflow.parameters.quality_threshold}}"
+          - "--split"
+          - "{{workflow.parameters.split}}"
+          - "--dataset-id"
+          - "{{workflow.parameters.dataset_id}}"
+          - "--version"
+          - "{{workflow.parameters.version}}"
+          - "--log-format"
+          - "json"
+        envFrom:
+          - secretRef: {name: robot-dh-v1-6-secrets}
+          - configMapRef: {name: robot-dh-v1-6-config, optional: true}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 500m, memory: 1Gi}
+          limits: {cpu: 2, memory: 4Gi}
+      retryStrategy:
+        limit: 1
+        retryPolicy: "Always"

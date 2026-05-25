@@ -1,5 +1,9 @@
 """ETL Runner：编排 raw -> ods -> dwd（-> ads），支持单数据集或批量扫描。
 
+v1.6 新增：
+- phase-level run：normalize | features | ads | all
+- normalize 透传 resume / force / heartbeat / progress 参数
+
 公开 API：
     etl_run(...)  : 单数据集流水线（normalize + build-features [+ build-ads]）
     etl_scan(...) : 扫描 raw 根目录，对每个数据集调用 etl_run
@@ -31,6 +35,9 @@ from robot_dh.warehouse.service import WarehouseService
 LOG = logging.getLogger(__name__)
 
 
+VALID_PHASES = ("normalize", "features", "ads", "all")
+
+
 @dataclass(slots=True)
 class EtlRunResult:
     dataset_id: str
@@ -47,6 +54,7 @@ class EtlRunResult:
     ads: AdsResult | None
     error: str | None = None
     summary_uri: str | None = None
+    phase: str = "all"
 
     def to_dict(self) -> dict[str, Any]:
         def _r(r: Any) -> Any:
@@ -70,11 +78,11 @@ class EtlRunResult:
             "features": _r(self.features),
             "ads": _r(self.ads),
             "summary_uri": self.summary_uri,
+            "phase": self.phase,
         }
 
 
 def _resolve_lake_layout(lake_root_uri: str, dataset_id: str, version: str) -> tuple[str, str, str]:
-    """返回标准布局下的 (ods_uri, dwd_uri, ads_uri)。"""
     ods_uri = join_uri(lake_root_uri, "ods", dataset_id, version)
     dwd_uri = join_uri(lake_root_uri, "dwd", dataset_id, version)
     ads_uri = join_uri(lake_root_uri, "ads", "quality")
@@ -82,7 +90,6 @@ def _resolve_lake_layout(lake_root_uri: str, dataset_id: str, version: str) -> t
 
 
 def _infer_dataset_identity(dataset_uri: str) -> tuple[str | None, str | None]:
-    """从 raw URI 推断 (dataset_id, version)，形如 s3://<bucket>/raw/<id>/<ver>/... 或本地 lake/raw/...。"""
     if is_s3_uri(dataset_uri):
         key = parse_uri(dataset_uri).key
     else:
@@ -114,8 +121,26 @@ def etl_run(
     db_uri: str | None = None,
     warehouse: WarehouseService | None = None,
     summary_dir: Path | None = None,
+    phase: str = "all",
+    resume: bool = True,
+    force: bool = False,
+    heartbeat_interval_sec: float = 30.0,
+    progress_log_interval_sec: float = 30.0,
+    workflow_name: str | None = None,
+    perf_dir: Path | None = None,
+    warehouse_v16: Any | None = None,
 ) -> EtlRunResult:
-    """对单个数据集执行 normalize + build-features（可选 build-ads）。"""
+    """对单个数据集执行 normalize + build-features（可选 build-ads）。
+
+    phase: normalize | features | ads | all
+        - normalize: 仅 raw -> ods
+        - features:  从已有 ods 构建 dwd
+        - ads:       从已有 dwd 写 ads
+        - all:       原 v1.5 行为
+    """
+    if phase not in VALID_PHASES:
+        raise ValueError(f"etl_run: unsupported phase={phase!r}; expected one of {VALID_PHASES}")
+
     if warehouse is None:
         warehouse = WarehouseService(soft=True, db_uri=db_uri)
 
@@ -131,11 +156,14 @@ def etl_run(
     started = time.time()
     started_iso = utcnow_iso()
 
-    LOG.info("etl_run START: job_id=%s dataset_uri=%s -> %s/%s", job_id, dataset_uri, ds, ver)
+    LOG.info(
+        "etl_run START: job_id=%s dataset_uri=%s -> %s/%s phase=%s resume=%s force=%s",
+        job_id, dataset_uri, ds, ver, phase, resume, force,
+    )
 
     warehouse.record_etl_job_start(
         job_id=job_id,
-        job_type="etl_run",
+        job_type=f"etl_run.{phase}",
         input_uri=dataset_uri,
         output_uri=lake_root_uri,
     )
@@ -148,13 +176,14 @@ def etl_run(
         raw_uri=dataset_uri,
         ods_uri=ods_uri,
         dwd_uri=dwd_uri,
-        ads_uri=ads_uri if build_ads_layer else None,
+        ads_uri=ads_uri if (build_ads_layer or phase == "ads") else None,
         job_id=job_id,
         status="RUNNING",
         duration_sec=0.0,
         normalize=None,
         features=None,
         ads=None,
+        phase=phase,
     )
 
     try:
@@ -164,26 +193,44 @@ def etl_run(
             raw_uri=dataset_uri,
             status="discovered",
         )
-        LOG.info("  [normalize] %s -> %s", dataset_uri, ods_uri)
-        result.normalize = normalize_dataset(
-            dataset_uri=dataset_uri,
-            output_uri=ods_uri,
-            dataset_id=ds,
-            version=ver,
-            job_id=f"{job_id}::normalize",
-            warehouse=warehouse,
-            lake_root_uri=lake_root_uri,
-        )
-        LOG.info("  [build-features] %s -> %s", ods_uri, dwd_uri)
-        result.features = build_features(
-            input_uri=ods_uri,
-            output_uri=dwd_uri,
-            config_path=features_config_path,
-            job_id=f"{job_id}::features",
-            warehouse=warehouse,
-            lake_root_uri=lake_root_uri,
-        )
-        if build_ads_layer:
+
+        run_normalize = phase in ("normalize", "all")
+        run_features = phase in ("features", "all")
+        run_ads = (phase == "ads") or (phase == "all" and build_ads_layer)
+
+        if run_normalize:
+            LOG.info("  [normalize] %s -> %s", dataset_uri, ods_uri)
+            result.normalize = normalize_dataset(
+                dataset_uri=dataset_uri,
+                output_uri=ods_uri,
+                dataset_id=ds,
+                version=ver,
+                job_id=f"{job_id}::normalize",
+                warehouse=warehouse,
+                lake_root_uri=lake_root_uri,
+                resume=resume,
+                force=force,
+                heartbeat_interval_sec=heartbeat_interval_sec,
+                progress_log_interval_sec=progress_log_interval_sec,
+                workflow_name=workflow_name,
+                step_name=f"{ds}-{ver}-normalize",
+                perf_dir=perf_dir,
+                warehouse_v16=warehouse_v16,
+            )
+
+        if run_features:
+            features_input = ods_uri
+            LOG.info("  [build-features] %s -> %s", features_input, dwd_uri)
+            result.features = build_features(
+                input_uri=features_input,
+                output_uri=dwd_uri,
+                config_path=features_config_path,
+                job_id=f"{job_id}::features",
+                warehouse=warehouse,
+                lake_root_uri=lake_root_uri,
+            )
+
+        if run_ads:
             LOG.info("  [build-ads] %s -> %s", join_uri(lake_root_uri, "dwd"), ads_uri)
             result.ads = build_ads(
                 input_root_uri=join_uri(lake_root_uri, "dwd"),
@@ -208,16 +255,20 @@ def etl_run(
                 "normalize_rows": result.normalize.num_samples if result.normalize else 0,
                 "features_press_count": result.features.num_press_events if result.features else 0,
                 "duration_ms": int(elapsed * 1000),
+                "phase": phase,
             },
         )
 
-        # 顶层血缘边 raw -> dwd，便于图查询
-        warehouse.record_lineage_edge(
-            source_uri=dataset_uri,
-            target_uri=dwd_uri,
-            job_id=job_id,
-            job_type="etl_run",
-        )
+        # 顶层血缘边 raw -> dwd（仅 features/all 跑过时）
+        if run_features:
+            # 顶层血缘边的 job_type 保持 v1.5 "etl_run" 以兼容下游查询；phase!=all 时附带后缀。
+            edge_job_type = "etl_run" if phase == "all" else f"etl_run.{phase}"
+            warehouse.record_lineage_edge(
+                source_uri=dataset_uri,
+                target_uri=dwd_uri,
+                job_id=job_id,
+                job_type=edge_job_type,
+            )
 
     except Exception as err:  # noqa: BLE001
         elapsed = time.time() - started
@@ -227,7 +278,6 @@ def etl_run(
         warehouse.record_etl_job_finish(job_id=job_id, status="FAIL", error_message=str(err))
         LOG.error("etl_run FAIL: %s", err)
 
-    # 若指定 summary_dir，始终写入本地 etl_summary.json
     if summary_dir is not None:
         summary_dir = summary_dir.expanduser().resolve()
         summary_dir.mkdir(parents=True, exist_ok=True)
@@ -268,11 +318,6 @@ class EtlScanResult:
 
 
 def _discover_raw_datasets(root_uri: str) -> list[tuple[str, str, str]]:
-    """返回 <root>/raw/ 下 (dataset_id, version, dataset_uri) 列表。
-
-    S3：列出 raw/ 对象，按 key 前两段分组。
-    本地：查找含 endpose.pt 或 HF 风格 parquet/HDF5 的 raw slice。
-    """
     out: list[tuple[str, str, str]] = []
     store = create_lake_store(root_uri)
     if is_s3_uri(root_uri):
@@ -307,7 +352,6 @@ def _discover_raw_datasets(root_uri: str) -> list[tuple[str, str, str]]:
             ancestors = list(dataset_dir.parents)
             for i, anc in enumerate(ancestors):
                 if anc.name == "raw":
-                    # dataset_dir 在 raw 下；推断 dataset_id/version 层级
                     rel_parts = dataset_dir.relative_to(anc).parts
                     if len(rel_parts) >= 2:
                         ds_id_from_path = rel_parts[0]
@@ -317,7 +361,6 @@ def _discover_raw_datasets(root_uri: str) -> list[tuple[str, str, str]]:
                     break
             ds_id = ds_id_from_path or dataset_dir.name
             ver = ver_from_path or "v1"
-            # 路径推断在 raw/ 下优先；meta.yaml 仅在路径无法推断时补全（非规范路径传入）
             if ds_id_from_path is None or ver_from_path is None:
                 meta_path = dataset_dir / "meta.yaml"
                 if meta_path.is_file():
@@ -382,7 +425,6 @@ def etl_scan(
     include_patterns: list[str] | None = None,
     exclude_patterns: list[str] | None = None,
 ) -> EtlScanResult:
-    """发现 `<root_uri>/raw/` 下数据集并对每个执行 etl_run。"""
     scan_id = f"etl-scan-{uuid.uuid4().hex[:12]}"
     started = time.time()
     LOG.info("etl_scan START: scan_id=%s root=%s lake=%s", scan_id, root_uri, lake_root_uri)
@@ -432,6 +474,7 @@ def etl_scan(
                 job_id=f"{scan_id}-{ds}-{ver}",
                 db_uri=db_uri,
                 warehouse=warehouse,
+                force=force,
             )
             if result.status in {"OK", "WARN"}:
                 succeeded += 1

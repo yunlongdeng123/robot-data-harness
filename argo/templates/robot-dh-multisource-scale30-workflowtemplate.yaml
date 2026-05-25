@@ -1,0 +1,531 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: robot-dh-multisource-scale30
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: v1-6-argo
+    role: multisource-scale30
+spec:
+  serviceAccountName: robot-dh-workflow
+  entrypoint: main
+  ttlStrategy:
+    secondsAfterCompletion: 86400
+    secondsAfterFailure: 172800
+    secondsAfterSuccess: 86400
+  podGC:
+    strategy: OnWorkflowCompletion
+  activeDeadlineSeconds: 43200
+  podSpecPatch: |
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      fsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+  arguments:
+    parameters:
+      - name: lake_root
+        value: "s3://robot-lake"
+      - name: droid_uri
+        value: "s3://robot-datasets/raw/droid_lerobot_scale30/v1"
+      - name: droid_dataset_id
+        value: "droid_lerobot_scale30"
+      - name: robomimic_uri
+        value: "s3://robot-datasets/raw/robomimic_scale30/v1"
+      - name: robomimic_dataset_id
+        value: "robomimic_scale30"
+      - name: bridge_uri
+        value: "s3://robot-datasets/raw/bridgedata_v2_scale30/v1"
+      - name: bridge_dataset_id
+        value: "bridgedata_v2_scale30"
+      - name: version
+        value: "v1"
+      - name: quality_threshold
+        value: "80"
+      - name: target_partition_size_gb
+        value: "2"
+      - name: max_workers
+        value: "2"
+      - name: heartbeat_interval_sec
+        value: "60"
+      - name: fail_on_contract_fail
+        value: "false"
+  templates:
+    - name: main
+      dag:
+        tasks:
+          - name: discover-assets
+            template: lake-list
+          - name: droid-qc
+            depends: "discover-assets"
+            template: qc-contract-run
+            arguments:
+              parameters:
+                - {name: family, value: "droid"}
+                - {name: dataset_uri, value: "{{workflow.parameters.droid_uri}}"}
+                - {name: dataset_id, value: "{{workflow.parameters.droid_dataset_id}}"}
+                - {name: contract_path, value: "configs/qc/droid_contract.yaml"}
+          - name: robomimic-qc
+            depends: "discover-assets"
+            template: qc-contract-run
+            arguments:
+              parameters:
+                - {name: family, value: "robomimic"}
+                - {name: dataset_uri, value: "{{workflow.parameters.robomimic_uri}}"}
+                - {name: dataset_id, value: "{{workflow.parameters.robomimic_dataset_id}}"}
+                - {name: contract_path, value: "configs/qc/robomimic_contract.yaml"}
+          - name: bridge-qc
+            depends: "discover-assets"
+            template: qc-contract-run
+            arguments:
+              parameters:
+                - {name: family, value: "bridge"}
+                - {name: dataset_uri, value: "{{workflow.parameters.bridge_uri}}"}
+                - {name: dataset_id, value: "{{workflow.parameters.bridge_dataset_id}}"}
+                - {name: contract_path, value: "configs/qc/bridge_contract.yaml"}
+          - name: droid-partition
+            depends: "droid-qc"
+            template: partition-plan
+            arguments:
+              parameters:
+                - {name: dataset_uri, value: "{{workflow.parameters.droid_uri}}"}
+                - {name: dataset_id, value: "{{workflow.parameters.droid_dataset_id}}"}
+          - name: robomimic-partition
+            depends: "robomimic-qc"
+            template: partition-plan
+            arguments:
+              parameters:
+                - {name: dataset_uri, value: "{{workflow.parameters.robomimic_uri}}"}
+                - {name: dataset_id, value: "{{workflow.parameters.robomimic_dataset_id}}"}
+          - name: bridge-partition
+            depends: "bridge-qc"
+            template: partition-plan
+            arguments:
+              parameters:
+                - {name: dataset_uri, value: "{{workflow.parameters.bridge_uri}}"}
+                - {name: dataset_id, value: "{{workflow.parameters.bridge_dataset_id}}"}
+          - name: droid-normalize
+            depends: "droid-partition"
+            template: etl-phase
+            arguments:
+              parameters:
+                - {name: dataset_uri, value: "{{workflow.parameters.droid_uri}}"}
+                - {name: dataset_id, value: "{{workflow.parameters.droid_dataset_id}}"}
+                - {name: phase, value: "normalize"}
+          - name: robomimic-normalize
+            depends: "robomimic-partition"
+            template: etl-phase
+            arguments:
+              parameters:
+                - {name: dataset_uri, value: "{{workflow.parameters.robomimic_uri}}"}
+                - {name: dataset_id, value: "{{workflow.parameters.robomimic_dataset_id}}"}
+                - {name: phase, value: "normalize"}
+          - name: bridge-normalize
+            depends: "bridge-partition"
+            template: etl-phase
+            arguments:
+              parameters:
+                - {name: dataset_uri, value: "{{workflow.parameters.bridge_uri}}"}
+                - {name: dataset_id, value: "{{workflow.parameters.bridge_dataset_id}}"}
+                - {name: phase, value: "normalize"}
+          - name: droid-features
+            depends: "droid-normalize"
+            template: etl-phase
+            arguments:
+              parameters:
+                - {name: dataset_uri, value: "{{workflow.parameters.droid_uri}}"}
+                - {name: dataset_id, value: "{{workflow.parameters.droid_dataset_id}}"}
+                - {name: phase, value: "features"}
+          - name: robomimic-features
+            depends: "robomimic-normalize"
+            template: etl-phase
+            arguments:
+              parameters:
+                - {name: dataset_uri, value: "{{workflow.parameters.robomimic_uri}}"}
+                - {name: dataset_id, value: "{{workflow.parameters.robomimic_dataset_id}}"}
+                - {name: phase, value: "features"}
+          - name: bridge-features
+            depends: "bridge-normalize"
+            template: etl-phase
+            arguments:
+              parameters:
+                - {name: dataset_uri, value: "{{workflow.parameters.bridge_uri}}"}
+                - {name: dataset_id, value: "{{workflow.parameters.bridge_dataset_id}}"}
+                - {name: phase, value: "features"}
+          - name: build-ads
+            depends: "droid-features && robomimic-features && bridge-features"
+            template: build-ads
+          - name: benchmark-regression
+            depends: "build-ads"
+            template: benchmark
+          - name: ml-ready-export
+            depends: "build-ads"
+            template: ml-ready-export
+          - name: publish-lineage-report
+            depends: "ml-ready-export"
+            template: lineage-report
+          - name: argo-sync
+            depends: "publish-lineage-report"
+            template: argo-sync
+
+    - name: lake-list
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["robot-dh"]
+        args: ["lake", "list", "--layer", "raw", "--include", "*scale30*", "--output", "json"]
+        envFrom:
+          - secretRef: {name: robot-dh-v1-6-secrets}
+          - configMapRef: {name: robot-dh-v1-6-config, optional: true}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 500m, memory: 1Gi}
+          limits: {cpu: 1, memory: 2Gi}
+
+    - name: qc-contract-run
+      inputs:
+        parameters:
+          - {name: family}
+          - {name: dataset_uri}
+          - {name: dataset_id}
+          - {name: contract_path}
+      # SIGKILL 之前给 30s 把 stdout buffer 刷干净，避免 OOM/Deadline 又落 0B archive log。
+      podSpecPatch: |
+        terminationGracePeriodSeconds: 30
+      volumes:
+        - name: events
+          emptyDir: {sizeLimit: 256Mi}
+        - name: workdir
+          emptyDir: {sizeLimit: 20Gi}
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        # tee 双写到 emptyDir，archive log + emptyDir 互为旁证；
+        # `-u` 强制 unbuffered stdout/stderr，杜绝 SIGKILL 丢日志。
+        # pipefail 让 python 的 exit code 透传到 step。
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -o pipefail
+            mkdir -p /var/run/robot-dh/events /var/run/robot-dh/workdir
+            python -u -m robot_dh.cli \
+              qc contract run \
+              --dataset-family "{{inputs.parameters.family}}" \
+              --dataset-uri "{{inputs.parameters.dataset_uri}}" \
+              --dataset-id "{{inputs.parameters.dataset_id}}" \
+              --version "{{workflow.parameters.version}}" \
+              --output "{{workflow.parameters.lake_root}}/qc/{{inputs.parameters.dataset_id}}/{{workflow.parameters.version}}" \
+              --contract "{{inputs.parameters.contract_path}}" \
+              --log-format json 2>&1 | tee /var/run/robot-dh/events/qc-stdout.log
+        env:
+          - name: ROBOT_DH_EVENTS_DIR
+            value: /var/run/robot-dh/events
+          - name: TMPDIR
+            value: /var/run/robot-dh/workdir
+          - name: PYTHONUNBUFFERED
+            value: "1"
+          - name: ROBOT_DH_QC_PROBE_CONCURRENCY
+            value: "4"
+        envFrom:
+          - secretRef: {name: robot-dh-v1-6-secrets}
+          - configMapRef: {name: robot-dh-v1-6-config, optional: true}
+        volumeMounts:
+          - name: events
+            mountPath: /var/run/robot-dh/events
+          - name: workdir
+            mountPath: /var/run/robot-dh/workdir
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        # droid lerobot v2 lazy profile 理论 peak < 500 MiB，4Gi 是兜底；robomimic 并发
+        # 4 路 download HDF5 高峰约 4 * 1.1 GiB = 4.4 GiB，需要 6Gi 才能稳。
+        resources:
+          requests: {cpu: 500m, memory: 1Gi}
+          limits: {cpu: 2, memory: 6Gi}
+      # v1.6.8（fvx5z F1）：7200s（2h）→ 1800s（30min）。
+      # 单 step 收敛预算：bridge-qc enrichment 用 fast s3fs（< 30s），robomimic 26 文件
+      # 4 路并发 × fast boto3 client（worst-case 195s/file）= 26/4 × 195 ≈ 1267s，
+      # 留 9 min 富裕给 contract aggregate / report write。再撞墙就是真异常，
+      # 立刻 SIGTERM → archive log 出来才能定位。
+      activeDeadlineSeconds: 1800
+      retryStrategy:
+        limit: 1
+        retryPolicy: "Always"
+
+    - name: partition-plan
+      inputs:
+        parameters:
+          - {name: dataset_uri}
+          - {name: dataset_id}
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["robot-dh"]
+        args:
+          - "partition"
+          - "plan"
+          - "--dataset"
+          - "{{inputs.parameters.dataset_uri}}"
+          - "--dataset-id"
+          - "{{inputs.parameters.dataset_id}}"
+          - "--version"
+          - "{{workflow.parameters.version}}"
+          - "--output"
+          - "{{workflow.parameters.lake_root}}/tmp/{{workflow.name}}/{{inputs.parameters.dataset_id}}_partition_plan.json"
+          - "--target-partition-size-gb"
+          - "{{workflow.parameters.target_partition_size_gb}}"
+        envFrom:
+          - secretRef: {name: robot-dh-v1-6-secrets}
+          - configMapRef: {name: robot-dh-v1-6-config, optional: true}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 500m, memory: 1Gi}
+          limits: {cpu: 1, memory: 2Gi}
+
+    - name: etl-phase
+      inputs:
+        parameters:
+          - {name: dataset_uri}
+          - {name: dataset_id}
+          - {name: phase}
+      # v1.6.7：emptyDir 16 Gi → 32 Gi 双层 + ephemeral-storage limit。
+      # droid_lerobot_scale30 跳过 videos/ 之后单 partition 仍有 ~14 GiB raw（chunk
+      # parquet ~12 GiB + meta），加上 normalize 中间态 / pose.parquet upload buffer,
+      # 单 step 32 GiB 余量舒服。emptyDir.sizeLimit 与 ephemeral-storage limit 双层配
+      # 才能让 kubelet 真触发 Evicted（仅 sizeLimit 不会拒绝调度）。
+      # SIGKILL 之前给 30s 把 stdout buffer 刷干净，避免 OOM/Deadline 又落 0B archive log。
+      podSpecPatch: |
+        terminationGracePeriodSeconds: 30
+      volumes:
+        - name: events
+          emptyDir: {sizeLimit: 256Mi}
+        - name: workdir
+          emptyDir: {sizeLimit: 32Gi}
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        # v1.6.8（fvx5z F3）：与 qc-contract-run 一致改成 `python -u + tee` —— droid
+        # 18 GiB download 静默 2h+ 期间，archive log 完全没东西可看。tee 把 stdout
+        # 双写到 emptyDir /var/run/robot-dh/events/etl-stdout.log，pod 还在跑就能
+        # 进容器里直读；pod 终态后 archive log + emptyDir 互为旁证。`python -u`
+        # 强制 unbuffered，pipefail 让 python 的 exit code 透传到 step。
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -o pipefail
+            mkdir -p /var/run/robot-dh/events /var/run/robot-dh/workdir
+            python -u -m robot_dh.cli \
+              etl run \
+              --dataset "{{inputs.parameters.dataset_uri}}" \
+              --dataset-id "{{inputs.parameters.dataset_id}}" \
+              --version "{{workflow.parameters.version}}" \
+              --lake-root "{{workflow.parameters.lake_root}}" \
+              --phase "{{inputs.parameters.phase}}" \
+              --resume \
+              --heartbeat-interval-sec "{{workflow.parameters.heartbeat_interval_sec}}" \
+              --workflow-name "{{workflow.name}}" \
+              --log-format json 2>&1 | tee /var/run/robot-dh/events/etl-stdout.log
+        env:
+          - name: ROBOT_DH_EVENTS_DIR
+            value: /var/run/robot-dh/events
+          - name: TMPDIR
+            value: /var/run/robot-dh/workdir
+          - name: ROBOT_DH_INPUT_CACHE_DIR
+            value: /var/run/robot-dh/workdir/input-cache
+          - name: PYTHONUNBUFFERED
+            value: "1"
+          # v1.6.8：让 download_dir 中段每 30s 出一行 wall-clock 进度，避免 droid 18 GiB
+          # 单文件几分钟时进度 log（按 50 文件触发）疏到看上去"卡死"。
+          - name: ROBOT_DH_DOWNLOAD_PROGRESS_INTERVAL_SEC
+            value: "30"
+        envFrom:
+          - secretRef: {name: robot-dh-v1-6-secrets}
+          - configMapRef: {name: robot-dh-v1-6-config, optional: true}
+        volumeMounts:
+          - name: events
+            mountPath: /var/run/robot-dh/events
+          - name: workdir
+            mountPath: /var/run/robot-dh/workdir
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 1, memory: 2Gi, ephemeral-storage: 4Gi}
+          limits: {cpu: 4, memory: 8Gi, ephemeral-storage: 32Gi}
+      activeDeadlineSeconds: 21600
+      retryStrategy:
+        limit: 1
+        retryPolicy: "Always"
+
+    - name: build-ads
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["robot-dh"]
+        args:
+          - "build-ads"
+          - "--input-root"
+          - "{{workflow.parameters.lake_root}}/dwd"
+          - "--output"
+          - "{{workflow.parameters.lake_root}}/ads/quality"
+          - "--log-format"
+          - "json"
+        envFrom:
+          - secretRef: {name: robot-dh-v1-6-secrets}
+          - configMapRef: {name: robot-dh-v1-6-config, optional: true}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 500m, memory: 1Gi}
+          limits: {cpu: 2, memory: 4Gi}
+
+    - name: benchmark
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["robot-dh"]
+        args:
+          - "benchmark"
+          - "run"
+          - "--suite"
+          - "configs/benchmark_suite.yaml"
+          - "--output"
+          - "/tmp/benchmark/{{workflow.name}}"
+          - "--record-to-registry"
+          - "--log-format"
+          - "json"
+        envFrom:
+          - secretRef: {name: robot-dh-v1-6-secrets}
+          - configMapRef: {name: robot-dh-v1-6-config, optional: true}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 500m, memory: 1Gi}
+          limits: {cpu: 2, memory: 4Gi}
+      retryStrategy:
+        limit: 0
+
+    - name: ml-ready-export
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["robot-dh"]
+        args:
+          - "ml-ready"
+          - "export"
+          - "--input-root"
+          - "{{workflow.parameters.lake_root}}/dwd"
+          - "--quality-root"
+          - "{{workflow.parameters.lake_root}}/ads/quality"
+          - "--qc-root"
+          - "{{workflow.parameters.lake_root}}/qc"
+          - "--output"
+          - "{{workflow.parameters.lake_root}}/ml-ready/scale30/{{workflow.parameters.version}}"
+          - "--quality-threshold"
+          - "{{workflow.parameters.quality_threshold}}"
+          - "--split"
+          - "0.8,0.1,0.1"
+          - "--dataset-id"
+          - "scale30"
+          - "--version"
+          - "{{workflow.parameters.version}}"
+          - "--log-format"
+          - "json"
+        envFrom:
+          - secretRef: {name: robot-dh-v1-6-secrets}
+          - configMapRef: {name: robot-dh-v1-6-config, optional: true}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 500m, memory: 1Gi}
+          limits: {cpu: 2, memory: 4Gi}
+
+    - name: lineage-report
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["robot-dh"]
+        args:
+          - "lineage"
+          - "report"
+          - "--workflow-name"
+          - "{{workflow.name}}"
+          - "--output"
+          - "{{workflow.parameters.lake_root}}/lineage/reports/{{workflow.name}}.json"
+        envFrom:
+          - secretRef: {name: robot-dh-v1-6-secrets}
+          - configMapRef: {name: robot-dh-v1-6-config, optional: true}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 200m, memory: 256Mi}
+          limits: {cpu: 1, memory: 1Gi}
+
+    - name: argo-sync
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["robot-dh"]
+        args:
+          - "argo"
+          - "sync"
+          - "--workflow-name"
+          - "{{workflow.name}}"
+          - "--namespace"
+          - "robot-dh"
+        envFrom:
+          - secretRef: {name: robot-dh-v1-6-secrets}
+          - configMapRef: {name: robot-dh-v1-6-config, optional: true}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 200m, memory: 256Mi}
+          limits: {cpu: 1, memory: 1Gi}

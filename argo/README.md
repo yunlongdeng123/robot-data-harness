@@ -87,10 +87,14 @@ argo/
   README.md
   install/
     namespace.yaml
+    workflow-controller-artifact-repository.yaml   # v1.6 archiveLogs ConfigMap patch 模板
   templates/
     robot-dh-scale-etl-workflowtemplate.yaml
     robot-dh-benchmark-workflowtemplate.yaml
     robot-dh-build-ads-workflowtemplate.yaml
+    robot-dh-multisource-scale30-workflowtemplate.yaml
+    robot-dh-contract-qc-workflowtemplate.yaml
+    robot-dh-ml-ready-workflowtemplate.yaml
   workflows/
     submit-scale30-etl.yaml
     submit-benchmark.yaml
@@ -104,7 +108,52 @@ argo/
     argo_wait_workflow.sh
     argo_get_latest_logs.sh
     argo_delete_completed.sh
+    argo_sync_log_archive_secret.sh   # v1.6 把 S3 secret 复制到 argo namespace
+    argo_apply_log_archive.sh         # v1.6 patch workflow-controller-configmap
+    argo_verify_log_archive.sh        # v1.6 验证 archiveLogs 是否生效
 ```
+
+## v1.6 Argo 日志归档（来自 robot-dh-infra 的需求）
+
+需求来源：[`docs/v1_6_argo_log_archive_request.md`](../docs/v1_6_argo_log_archive_request.md)。
+完成回执：[`docs/v1_6_argo_log_archive_handoff.md`](../docs/v1_6_argo_log_archive_handoff.md)。
+
+工作流：
+
+1. 平台 secret 已 apply（`scripts/k8s_create_platform_secret_from_env.sh` 写出 `robot-dh/robot-dh-v1-6-secrets`）。
+2. Argo 已安装（`make argo-install`）。
+3. 一键启用日志归档：
+
+   ```
+   make argo-enable-log-archive
+   # = argo-sync-log-archive-secret + argo-apply-log-archive + argo-verify-log-archive
+   ```
+
+4. 重新 apply WorkflowTemplate（已把 `podGC.strategy` 改成 `OnWorkflowCompletion`，给 controller 留出归档窗口）：
+
+   ```
+   make argo-apply-templates
+   make argo-apply-platform
+   ```
+
+5. 提交一个 workflow，等终态后从 MinIO 验证：
+
+   ```
+   mc ls -r local/robot-dh-artifacts/argo-logs/ | head
+   mc cat local/robot-dh-artifacts/argo-logs/<ns>/<workflow.name>/<pod.name>/main.log | head
+   ```
+
+   或者：
+
+   ```
+   CHECK_OBJECTS=1 MC_ALIAS=local make argo-verify-log-archive
+   ```
+
+注意：
+
+- 对象路径模板与远端 robot-dh-infra 的 lifecycle 规则强耦合，**任何改动**都要先同步给 `docs/v1_6_argo_log_archive_request.md` 那边。
+- 不要把 `accessKey` / `secretKey` 直接写进 ConfigMap；`argo_apply_log_archive.sh` 永远引用 `argo/robot-dh-v1-6-secrets`。
+- `endpoint` 由脚本从 `robot-dh/robot-dh-v1-6-secrets.ROBOT_DH_S3_ENDPOINT_URL` 推断 host:port + insecure 字段；脚本会拒绝 127.0.0.1/localhost。
 
 K8s manifests for v1.5 RBAC live in `k8s/v1_5_argo/`.
 

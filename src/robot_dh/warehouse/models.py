@@ -1,12 +1,7 @@
-"""v1.4 数据湖元数据表的 SQLAlchemy 模型。
+"""v1.4/v1.5/v1.6 数据湖元数据表的 SQLAlchemy 模型。
 
-字段与云端 Postgres 一致（见 postgres/migrations/001_lake_metadata.reconstructed.sql）；
-如无 lineage_edges.job_id -> etl_jobs.job_id 外键、quality_snapshots 无唯一约束等差异均保留。
-
-5 张表共用 WarehouseBase，避免 v1.3 Base.metadata.create_all() 误建 v1.4 表；
-v1.4 表仅由 ensure_lake_tables() 创建（SQLite 测试、WarehouseService 连 SQLite 时）。
-
-Postgres 上 ensure_lake_tables() 为 no-op 安全的 create_all(checkfirst=True)，不改动云端已管表。
+所有表共用 WarehouseBase；ensure_lake_tables() 在 SQLite 测试与新 Postgres 上做 checkfirst create_all。
+真生产 Postgres 由 infra/migrations 严格管理，本模块仅作为 ORM 反射层。
 """
 
 from __future__ import annotations
@@ -301,6 +296,241 @@ class ArgoWorkflowRow(WarehouseBase):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
 
+# v1.6 新增表：QC contract / workflow / asset profile / ml-ready / partition / heartbeat / openlineage
+
+
+class QcContractRow(WarehouseBase):
+    """qc_contracts：dataset_family 级别的 contract 定义。"""
+
+    __tablename__ = "qc_contracts"
+
+    id: Mapped[int] = mapped_column(BigSerial, primary_key=True, autoincrement=True)
+    contract_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    dataset_family: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rules_json: Mapped[dict] = mapped_column(_JsonB, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class QcContractRunRow(WarehouseBase):
+    """qc_contract_runs：单次 contract 执行结果（含 metrics / failed / warning rules）。"""
+
+    __tablename__ = "qc_contract_runs"
+    __table_args__ = (
+        Index("idx_qc_contract_runs_contract_status", "contract_id", "status"),
+        Index("idx_qc_contract_runs_dataset_version", "dataset_id", "version", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(BigSerial, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    contract_id: Mapped[str] = mapped_column(Text, nullable=False)
+    dataset_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dataset_family: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dataset_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    metrics_json: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    failed_rules_json: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    warning_rules_json: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    artifacts_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class WorkflowRunRow(WarehouseBase):
+    """workflow_runs：v1.6 通用 workflow 元数据（与 v1.5 argo_workflow_runs 并存）。"""
+
+    __tablename__ = "workflow_runs"
+    __table_args__ = (
+        UniqueConstraint("workflow_namespace", "workflow_name", name="uq_workflow_runs_ns_name"),
+        Index("idx_workflow_runs_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(BigSerial, primary_key=True, autoincrement=True)
+    workflow_name: Mapped[str] = mapped_column(Text, nullable=False)
+    workflow_uid: Mapped[str | None] = mapped_column(Text, nullable=True)
+    workflow_namespace: Mapped[str | None] = mapped_column(Text, nullable=True)
+    workflow_template: Mapped[str | None] = mapped_column(Text, nullable=True)
+    workflow_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    parameters_json: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    metrics_json: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    workflow_json: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class WorkflowStepRow(WarehouseBase):
+    """workflow_steps：workflow 内 step / template 的细粒度状态。"""
+
+    __tablename__ = "workflow_steps"
+    __table_args__ = (
+        UniqueConstraint(
+            "workflow_namespace", "workflow_name", "step_name",
+            name="uq_workflow_steps_ns_wf_step",
+        ),
+        Index("idx_workflow_steps_workflow_phase", "workflow_name", "phase"),
+        Index("idx_workflow_steps_dataset_version", "dataset_id", "version"),
+    )
+
+    id: Mapped[int] = mapped_column(BigSerial, primary_key=True, autoincrement=True)
+    workflow_name: Mapped[str] = mapped_column(Text, nullable=False)
+    workflow_namespace: Mapped[str | None] = mapped_column(Text, nullable=True)
+    step_name: Mapped[str] = mapped_column(Text, nullable=False)
+    template_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pod_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    phase: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    dataset_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dataset_family: Mapped[str | None] = mapped_column(Text, nullable=True)
+    input_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metrics_json: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class AssetProfileRow(WarehouseBase):
+    """asset_profiles：单个 asset 的画像。"""
+
+    __tablename__ = "asset_profiles"
+    __table_args__ = (
+        Index("idx_asset_profiles_dataset_version_family", "dataset_id", "version", "dataset_family"),
+        Index("idx_asset_profiles_format_status", "asset_format", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(BigSerial, primary_key=True, autoincrement=True)
+    profile_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    dataset_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dataset_family: Mapped[str | None] = mapped_column(Text, nullable=True)
+    asset_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    asset_format: Mapped[str | None] = mapped_column(Text, nullable=True)
+    layer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    rows: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    files_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    episodes_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    videos_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    schema_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    null_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    profile_json: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class MlReadyDatasetRow(WarehouseBase):
+    """ml_ready_datasets：训练就绪数据集元数据。"""
+
+    __tablename__ = "ml_ready_datasets"
+    __table_args__ = (
+        Index("idx_ml_ready_datasets_dataset_version_status", "dataset_id", "version", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(BigSerial, primary_key=True, autoincrement=True)
+    dataset_id: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    dataset_family: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output_uri: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    train_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    val_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    test_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dataset_card_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    feature_schema_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quality_filter_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lineage_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quality_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    num_train: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    num_val: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    num_test: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metrics_json: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class DatasetPartitionRow(WarehouseBase):
+    """dataset_partitions：partial resume 用的 partition 登记。"""
+
+    __tablename__ = "dataset_partitions"
+    __table_args__ = (
+        Index("idx_dataset_partitions_dataset_version_type", "dataset_id", "version", "partition_type"),
+    )
+
+    id: Mapped[int] = mapped_column(BigSerial, primary_key=True, autoincrement=True)
+    partition_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    dataset_id: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    dataset_family: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dataset_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    partition_type: Mapped[str] = mapped_column(Text, nullable=False)
+    partition_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    partition_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    input_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    estimated_rows: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metrics_json: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class TaskHeartbeatRow(WarehouseBase):
+    """task_heartbeats：长任务心跳；同一 task_id 允许重复行（按 updated_at DESC 取最新）。"""
+
+    __tablename__ = "task_heartbeats"
+    __table_args__ = (
+        Index("idx_task_heartbeats_task_id", "task_id"),
+        Index("idx_task_heartbeats_workflow_step", "workflow_name", "step_name"),
+    )
+
+    id: Mapped[int] = mapped_column(BigSerial, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    workflow_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    step_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dataset_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    phase: Mapped[str | None] = mapped_column(Text, nullable=True)
+    progress_current: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    progress_total: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    progress_unit: Mapped[str | None] = mapped_column(Text, nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metrics_json: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class OpenLineageEventRow(WarehouseBase):
+    """openlineage_events：OpenLineage 风格事件表。"""
+
+    __tablename__ = "openlineage_events"
+    __table_args__ = (
+        Index("idx_openlineage_events_type_time", "event_type", "event_time"),
+    )
+
+    id: Mapped[int] = mapped_column(BigSerial, primary_key=True, autoincrement=True)
+    event_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    job_namespace: Mapped[str | None] = mapped_column(Text, nullable=True)
+    job_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    inputs_json: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    outputs_json: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    facets_json: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    raw_event_json: Mapped[dict | None] = mapped_column(_JsonB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
 def ensure_lake_tables(engine: Engine) -> None:
-    """若不存在则创建 v1.4 + v1.5 元数据表；生产 Postgres 通常已有，checkfirst 保证幂等；SQLite 测试依赖此建表。"""
+    """若不存在则创建 v1.4 + v1.5 + v1.6 元数据表；生产 Postgres 通常已有，checkfirst 保证幂等；SQLite 测试依赖此建表。"""
     WarehouseBase.metadata.create_all(engine, checkfirst=True)

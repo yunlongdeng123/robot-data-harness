@@ -1,0 +1,78 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: robot-dh-contract-qc
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: v1-6-argo
+    role: contract-qc
+spec:
+  serviceAccountName: robot-dh-workflow
+  entrypoint: main
+  ttlStrategy:
+    secondsAfterCompletion: 86400
+    secondsAfterFailure: 86400
+  podGC:
+    strategy: OnWorkflowCompletion
+  activeDeadlineSeconds: 14400
+  arguments:
+    parameters:
+      - name: lake_root
+        value: "s3://robot-lake"
+      - name: dataset_family
+        value: "droid"
+      - name: dataset_uri
+        value: "s3://robot-datasets/raw/droid_lerobot_scale30/v1"
+      - name: dataset_id
+        value: "droid_lerobot_scale30"
+      - name: version
+        value: "v1"
+      - name: contract_path
+        value: "configs/qc/droid_contract.yaml"
+  templates:
+    - name: main
+      dag:
+        tasks:
+          - name: qc-run
+            template: qc
+    - name: qc
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["robot-dh"]
+        args:
+          - "qc"
+          - "contract"
+          - "run"
+          - "--dataset-family"
+          - "{{workflow.parameters.dataset_family}}"
+          - "--dataset-uri"
+          - "{{workflow.parameters.dataset_uri}}"
+          - "--dataset-id"
+          - "{{workflow.parameters.dataset_id}}"
+          - "--version"
+          - "{{workflow.parameters.version}}"
+          - "--output"
+          - "{{workflow.parameters.lake_root}}/qc/{{workflow.parameters.dataset_id}}/{{workflow.parameters.version}}"
+          - "--contract"
+          - "{{workflow.parameters.contract_path}}"
+          - "--log-format"
+          - "json"
+        envFrom:
+          - secretRef: {name: robot-dh-v1-6-secrets}
+          - configMapRef: {name: robot-dh-v1-6-config, optional: true}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 500m, memory: 1Gi}
+          limits: {cpu: 1, memory: 2Gi}
+      activeDeadlineSeconds: 7200
+      retryStrategy:
+        limit: 1
+        retryPolicy: "Always"

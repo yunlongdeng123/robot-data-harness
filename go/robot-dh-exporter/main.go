@@ -72,13 +72,33 @@ func main() {
 		close(scrapeDone)
 	}
 
-	srv := server.New(cfg.ListenAddr, reg, logger)
+	healthBridge := newHealthBridge(collector)
+	srv := server.New(cfg.ListenAddr, reg, logger, healthBridge)
 	if err := server.Run(ctx, srv, logger); err != nil {
 		logger.Error("server exited with error", "error", err)
 		os.Exit(1)
 	}
 	<-scrapeDone
 	logger.Info("exporter exited cleanly")
+}
+
+// healthBridge 适配 metrics.Collector.Snapshot() 到 server.HealthProvider。
+// 单独写在 main 避免 metrics ↔ server 互相 import。
+type healthBridge struct {
+	collector *metrics.Collector
+}
+
+func newHealthBridge(c *metrics.Collector) *healthBridge {
+	return &healthBridge{collector: c}
+}
+
+func (h *healthBridge) Snapshot() server.HealthSnapshot {
+	s := h.collector.Snapshot()
+	return server.HealthSnapshot{
+		DBConnected:     s.DBConnected,
+		LastScrapeTime:  s.LastScrapeTime,
+		LastScrapeError: s.LastScrapeError,
+	}
 }
 
 func newLogger(level string) *slog.Logger {

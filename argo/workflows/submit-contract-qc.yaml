@@ -1,0 +1,11 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: robot-dh-contract-qc-
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: v1-6-argo
+spec:
+  workflowTemplateRef:
+    name: robot-dh-contract-qc

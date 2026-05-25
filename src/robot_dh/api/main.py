@@ -15,6 +15,7 @@ from robot_dh.warehouse.service import (
     LakeMetadataUnavailableError,
     WarehouseService,
 )
+from robot_dh.warehouse.robot_platform import PlatformWarehouse
 
 
 class ValidateRequest(BaseModel):
@@ -211,3 +212,154 @@ def runtime_events(
         )
     except LakeMetadataUnavailableError as err:
         raise HTTPException(status_code=503, detail=str(err))
+
+
+# v1.6 只读接口
+
+
+def _platform_warehouse_strict() -> PlatformWarehouse:
+    return PlatformWarehouse(soft=False)
+
+
+@app.get("/qc/contracts")
+def qc_contracts(limit: int = 100) -> list[dict]:
+    try:
+        return _platform_warehouse_strict().list_qc_contracts(limit=limit)
+    except LakeMetadataUnavailableError as err:
+        raise HTTPException(status_code=503, detail=str(err))
+
+
+@app.get("/qc/contracts/{contract_id}")
+def qc_contract_detail(contract_id: str) -> dict:
+    try:
+        rows = _platform_warehouse_strict().list_qc_contracts(limit=1000)
+    except LakeMetadataUnavailableError as err:
+        raise HTTPException(status_code=503, detail=str(err))
+    for r in rows:
+        if r["contract_id"] == contract_id:
+            return r
+    raise HTTPException(status_code=404, detail=f"contract not found: {contract_id}")
+
+
+@app.get("/qc/runs")
+def qc_runs(
+    contract_id: str | None = None,
+    dataset_id: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+) -> list[dict]:
+    try:
+        return _platform_warehouse_strict().list_qc_contract_runs(
+            contract_id=contract_id, dataset_id=dataset_id, status=status, limit=limit,
+        )
+    except LakeMetadataUnavailableError as err:
+        raise HTTPException(status_code=503, detail=str(err))
+
+
+@app.get("/qc/runs/{run_id}")
+def qc_run_detail(run_id: str) -> dict:
+    try:
+        payload = _platform_warehouse_strict().get_qc_contract_run(run_id)
+    except LakeMetadataUnavailableError as err:
+        raise HTTPException(status_code=503, detail=str(err))
+    if payload is None:
+        raise HTTPException(status_code=404, detail=f"qc run not found: {run_id}")
+    return payload
+
+
+@app.get("/assets/profiles")
+def asset_profiles(
+    dataset_id: str | None = None,
+    version: str | None = None,
+    dataset_family: str | None = None,
+    limit: int = 200,
+) -> list[dict]:
+    try:
+        return _platform_warehouse_strict().list_asset_profiles(
+            dataset_id=dataset_id, version=version, dataset_family=dataset_family, limit=limit,
+        )
+    except LakeMetadataUnavailableError as err:
+        raise HTTPException(status_code=503, detail=str(err))
+
+
+@app.get("/assets/profiles/{profile_id}")
+def asset_profile_detail(profile_id: str) -> dict:
+    try:
+        payload = _platform_warehouse_strict().get_asset_profile(profile_id)
+    except LakeMetadataUnavailableError as err:
+        raise HTTPException(status_code=503, detail=str(err))
+    if payload is None:
+        raise HTTPException(status_code=404, detail=f"profile not found: {profile_id}")
+    return payload
+
+
+
+# v1.6.3 ml-ready / workflows endpoints
+
+
+@app.get("/ml-ready")
+def ml_ready_list(limit: int = 100) -> list[dict]:
+    try:
+        return _platform_warehouse_strict().list_ml_ready_datasets(limit=limit)
+    except LakeMetadataUnavailableError as err:
+        raise HTTPException(status_code=503, detail=str(err))
+
+
+@app.get("/ml-ready/{dataset_id}/{version}")
+def ml_ready_detail(dataset_id: str, version: str) -> dict:
+    try:
+        payload = _platform_warehouse_strict().get_ml_ready_dataset(dataset_id=dataset_id, version=version)
+    except LakeMetadataUnavailableError as err:
+        raise HTTPException(status_code=503, detail=str(err))
+    if payload is None:
+        raise HTTPException(status_code=404, detail=f"ml-ready dataset not found: {dataset_id}/{version}")
+    return payload
+
+
+@app.get("/workflows")
+def workflows_list(status: str | None = None, limit: int = 100) -> list[dict]:
+    try:
+        return _platform_warehouse_strict().list_workflow_runs(status=status, limit=limit)
+    except LakeMetadataUnavailableError as err:
+        raise HTTPException(status_code=503, detail=str(err))
+
+
+@app.get("/workflows/{workflow_name}")
+def workflow_detail(workflow_name: str, namespace: str | None = None) -> dict:
+    try:
+        payload = _platform_warehouse_strict().get_workflow_run(
+            workflow_name=workflow_name, workflow_namespace=namespace,
+        )
+    except LakeMetadataUnavailableError as err:
+        raise HTTPException(status_code=503, detail=str(err))
+    if payload is None:
+        raise HTTPException(status_code=404, detail=f"workflow not found: {workflow_name}")
+    return payload
+
+
+@app.get("/workflows/{workflow_name}/steps")
+def workflow_steps(workflow_name: str, namespace: str | None = None, limit: int = 200) -> list[dict]:
+    try:
+        return _platform_warehouse_strict().list_workflow_steps(
+            workflow_name=workflow_name, workflow_namespace=namespace, limit=limit,
+        )
+    except LakeMetadataUnavailableError as err:
+        raise HTTPException(status_code=503, detail=str(err))
+
+
+class _WorkflowSubmitRequest(BaseModel):
+    workflow_name: str | None = None
+    parameters: dict | None = None
+
+
+@app.post("/workflows/scale30")
+def workflows_submit_scale30(req: _WorkflowSubmitRequest) -> dict:
+    """v1.6.3 控制面：当前不直接 submit 重 ETL，仅返回 501 + 提示走 Argo CLI。"""
+    raise HTTPException(
+        status_code=501,
+        detail={
+            "reason": "server-side argo submit not enabled in this build",
+            "hint": "use  or  instead",
+            "requested": req.dict(),
+        },
+    )

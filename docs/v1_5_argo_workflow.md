@@ -24,6 +24,9 @@
 | Secret 示例 | `k8s/v1_5_argo/secret.example.yaml` |
 | Secret 生成脚本 | `scripts/k8s_create_v1_5_secret_from_env.sh` |
 | Makefile target | `make argo-*` 系列 |
+| v1.6 archiveLogs ConfigMap patch | `argo/install/workflow-controller-artifact-repository.yaml` |
+| v1.6 archiveLogs apply / verify 脚本 | `argo/scripts/argo_apply_log_archive.sh` `argo_sync_log_archive_secret.sh` `argo_verify_log_archive.sh` |
+| v1.6 archiveLogs 入口 | `make argo-enable-log-archive` |
 
 ## 3. 完整上线步骤
 

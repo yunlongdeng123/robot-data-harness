@@ -29,7 +29,11 @@ from robot_dh.lake.commands import (
     render_list_human,
 )
 from robot_dh.logging_utils import configure_logging
-from robot_dh.perf import emit_perf_records, perf_records_from_etl_run
+from robot_dh.perf import (
+    emit_perf_records,
+    perf_records_from_etl_run,
+    reingest_pending_perf_records,
+)
 from robot_dh.perf.io_stats import measure_uri_bytes
 from robot_dh.pipeline import compare_reports, run_validation
 from robot_dh.registry import RegistryService
@@ -154,6 +158,14 @@ def build_parser() -> argparse.ArgumentParser:
     normalize_parser.add_argument("--version", type=str, default=None)
     normalize_parser.add_argument("--lake-root", type=str, default=None, help="Optional lake root for lineage JSONL")
     normalize_parser.add_argument("--job-id", type=str, default=None)
+    normalize_parser.add_argument("--resume", dest="resume", action="store_true", default=True)
+    normalize_parser.add_argument("--no-resume", dest="resume", action="store_false")
+    normalize_parser.add_argument("--force", action="store_true")
+    normalize_parser.add_argument("--heartbeat-interval-sec", type=float, default=30.0)
+    normalize_parser.add_argument("--progress-log-interval-sec", type=float, default=30.0)
+    normalize_parser.add_argument("--workflow-name", type=str, default=None)
+    normalize_parser.add_argument("--perf-dir", type=Path, default=None)
+    normalize_parser.add_argument("--log-format", choices=("human", "json"), default="human")
 
     features_parser = subparsers.add_parser("build-features", help="ods -> dwd: build feature parquets")
     features_parser.add_argument("--input", type=str, required=True, help="ods slice URI")
@@ -183,6 +195,13 @@ def build_parser() -> argparse.ArgumentParser:
     etl_run_parser.add_argument("--job-id", type=str, default=None)
     etl_run_parser.add_argument("--perf-dir", type=Path, default=None, help="write v1.5 perf JSON next to summary")
     etl_run_parser.add_argument("--log-format", choices=("human", "json"), default="human")
+    etl_run_parser.add_argument("--phase", choices=("normalize", "features", "ads", "all"), default="all")
+    etl_run_parser.add_argument("--resume", dest="resume", action="store_true", default=True)
+    etl_run_parser.add_argument("--no-resume", dest="resume", action="store_false")
+    etl_run_parser.add_argument("--force", action="store_true")
+    etl_run_parser.add_argument("--heartbeat-interval-sec", type=float, default=30.0)
+    etl_run_parser.add_argument("--progress-log-interval-sec", type=float, default=30.0)
+    etl_run_parser.add_argument("--workflow-name", type=str, default=None)
 
     etl_scan_parser = etl_subparsers.add_parser("scan", help="Discover datasets and run etl run for each")
     etl_scan_parser.add_argument("--root", type=str, required=True, help="Data root (e.g. s3://robot-datasets)")
@@ -231,6 +250,108 @@ def build_parser() -> argparse.ArgumentParser:
     etl_merge_parser.add_argument("--output", type=str, required=True)
     etl_merge_parser.add_argument("--log-format", choices=("human", "json"), default="human")
 
+    # v1.6.3: ml-ready export / list / show
+    mlr_parser = subparsers.add_parser("ml-ready", help="v1.6 ML-ready dataset export")
+    mlr_subparsers = mlr_parser.add_subparsers(dest="ml_ready_command")
+
+    mlr_export_parser = mlr_subparsers.add_parser("export", help="Build train/val/test parquet + dataset_card")
+    mlr_export_parser.add_argument("--input-root", type=str, required=True)
+    mlr_export_parser.add_argument("--quality-root", type=str, default=None)
+    mlr_export_parser.add_argument("--qc-root", type=str, default=None)
+    mlr_export_parser.add_argument("--output", type=str, required=True)
+    mlr_export_parser.add_argument("--quality-threshold", type=float, default=80.0)
+    mlr_export_parser.add_argument("--split", type=str, default="0.8,0.1,0.1")
+    mlr_export_parser.add_argument("--dataset-id", type=str, default="ml_ready")
+    mlr_export_parser.add_argument("--version", type=str, default="v1")
+    mlr_export_parser.add_argument("--dataset-family", type=str, default="all")
+    mlr_export_parser.add_argument("--min-episode-length", type=int, default=None)
+    mlr_export_parser.add_argument("--log-format", choices=("human", "json"), default="human")
+
+    mlr_subparsers.add_parser("list", help="List ml-ready datasets registered in PG")
+    mlr_show_parser = mlr_subparsers.add_parser("show", help="Show one ml-ready dataset row from PG")
+    mlr_show_parser.add_argument("--dataset-id", type=str, required=True)
+    mlr_show_parser.add_argument("--version", type=str, default="v1")
+
+    # v1.6.2: qc contract / profile / report
+    qc_parser = subparsers.add_parser("qc", help="v1.6 QC contract layer")
+    qc_subparsers = qc_parser.add_subparsers(dest="qc_command")
+
+    qc_contract_parser = qc_subparsers.add_parser("contract", help="contract operations")
+    qc_contract_subparsers = qc_contract_parser.add_subparsers(dest="qc_contract_command")
+
+    qc_contract_subparsers.add_parser("list", help="List built-in contracts")
+
+    qc_contract_run_parser = qc_contract_subparsers.add_parser("run", help="Run a contract on a dataset")
+    qc_contract_run_parser.add_argument("--dataset-family", type=str, required=True)
+    qc_contract_run_parser.add_argument("--dataset-uri", type=str, required=True)
+    qc_contract_run_parser.add_argument("--dataset-id", type=str, required=True)
+    qc_contract_run_parser.add_argument("--version", type=str, required=True)
+    qc_contract_run_parser.add_argument("--output", type=str, required=True)
+    qc_contract_run_parser.add_argument("--contract", type=Path, default=None)
+    qc_contract_run_parser.add_argument("--layer", type=str, default=None)
+    qc_contract_run_parser.add_argument("--log-format", choices=("human", "json"), default="human")
+
+    qc_profile_parser = qc_subparsers.add_parser("profile", help="Profile a dataset (asset_profile.json only)")
+    qc_profile_parser.add_argument("--dataset-uri", type=str, required=True)
+    qc_profile_parser.add_argument("--dataset-family", type=str, default="universal")
+    qc_profile_parser.add_argument("--dataset-id", type=str, default=None)
+    qc_profile_parser.add_argument("--version", type=str, default=None)
+    qc_profile_parser.add_argument("--output", type=str, required=True)
+    qc_profile_parser.add_argument("--log-format", choices=("human", "json"), default="human")
+
+    qc_report_parser = qc_subparsers.add_parser("report", help="Render markdown summary from a contract_report.json")
+    qc_report_parser.add_argument("--input", type=str, required=True)
+    qc_report_parser.add_argument("--log-format", choices=("human", "json"), default="human")
+
+    # v1.6: partition plan / list / run-normalize
+    partition_parser = subparsers.add_parser("partition", help="v1.6 partition planning for large datasets")
+    partition_subparsers = partition_parser.add_subparsers(dest="partition_command")
+
+    partition_plan_parser = partition_subparsers.add_parser("plan", help="Plan dataset partitions")
+    partition_plan_parser.add_argument("--dataset", type=str, required=True)
+    partition_plan_parser.add_argument("--dataset-id", type=str, required=True)
+    partition_plan_parser.add_argument("--version", type=str, required=True)
+    partition_plan_parser.add_argument("--output", type=str, required=True)
+    partition_plan_parser.add_argument("--target-partition-size-gb", type=float, default=2.0)
+    partition_plan_parser.add_argument("--family", type=str, default=None)
+    partition_plan_parser.add_argument("--log-format", choices=("human", "json"), default="human")
+
+    partition_list_parser = partition_subparsers.add_parser("list", help="List partitions in a plan")
+    partition_list_parser.add_argument("--plan", type=str, required=True)
+    partition_list_parser.add_argument("--log-format", choices=("human", "json"), default="human")
+
+    partition_run_normalize_parser = partition_subparsers.add_parser(
+        "run-normalize", help="Run normalize for a single partition by index",
+    )
+    partition_run_normalize_parser.add_argument("--plan", type=str, required=True)
+    partition_run_normalize_parser.add_argument("--partition-index", type=int, required=True)
+    partition_run_normalize_parser.add_argument("--output", type=str, required=True)
+    partition_run_normalize_parser.add_argument("--lake-root", type=str, default=None)
+    partition_run_normalize_parser.add_argument("--heartbeat-interval-sec", type=float, default=30.0)
+    partition_run_normalize_parser.add_argument("--progress-log-interval-sec", type=float, default=30.0)
+    partition_run_normalize_parser.add_argument("--resume", dest="resume", action="store_true", default=True)
+    partition_run_normalize_parser.add_argument("--no-resume", dest="resume", action="store_false")
+    partition_run_normalize_parser.add_argument("--force", action="store_true")
+    partition_run_normalize_parser.add_argument("--log-format", choices=("human", "json"), default="human")
+
+    # v1.6.4: argo sync / lineage report
+    argo_parser = subparsers.add_parser("argo", help="v1.6 Argo workflow metadata sync")
+    argo_subparsers = argo_parser.add_subparsers(dest="argo_command")
+    argo_sync_parser = argo_subparsers.add_parser("sync", help="Sync workflow status from kubectl into PG")
+    argo_sync_parser.add_argument("--workflow-name", type=str, required=True)
+    argo_sync_parser.add_argument("--namespace", type=str, default="robot-dh")
+    argo_sync_parser.add_argument("--from-json", type=Path, default=None,
+        help="Read workflow JSON from a local file instead of calling kubectl")
+    argo_sync_parser.add_argument("--log-format", choices=("human", "json"), default="human")
+
+    lineage_parser = subparsers.add_parser("lineage", help="v1.6 lineage report")
+    lineage_subparsers = lineage_parser.add_subparsers(dest="lineage_command")
+    lineage_report_parser = lineage_subparsers.add_parser("report", help="Build a lineage report for a workflow")
+    lineage_report_parser.add_argument("--workflow-name", type=str, required=True)
+    lineage_report_parser.add_argument("--namespace", type=str, default="robot-dh")
+    lineage_report_parser.add_argument("--output", type=str, required=True)
+    lineage_report_parser.add_argument("--log-format", choices=("human", "json"), default="human")
+
     # v1.5: mutate
     mutate_parser = subparsers.add_parser("mutate", help="Apply a benchmark mutation to a local dataset")
     mutate_parser.add_argument("--dataset", type=Path, required=True)
@@ -253,10 +374,87 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark_report_parser.add_argument("--benchmark-dir", type=Path, required=True)
     benchmark_report_parser.add_argument("--log-format", choices=("human", "json"), default="human")
 
+    perf_parser = subparsers.add_parser("perf", help="v1.6 perf record maintenance")
+    perf_subparsers = perf_parser.add_subparsers(dest="perf_command")
+    perf_reingest_parser = perf_subparsers.add_parser(
+        "reingest-pending",
+        help=(
+            "Re-ingest pending perf records (deferred by schema drift) into PG "
+            "and archive them locally (+ S3 mirror when configured)."
+        ),
+    )
+    perf_reingest_parser.add_argument(
+        "--pending-dir",
+        type=Path,
+        default=None,
+        help="Local pending dir; defaults to ROBOT_DH_PERF_PENDING_DIR or ~/.cache/robot-dh/perf-records-pending",
+    )
+    perf_reingest_parser.add_argument(
+        "--archive-dir",
+        type=Path,
+        default=None,
+        help="Local archive dir; defaults to ROBOT_DH_PERF_ARCHIVE_DIR or ~/.cache/robot-dh/perf-records-archived",
+    )
+    perf_reingest_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Scan but do not write to DB / move files",
+    )
+
     return parser
 
 
+def _emit_runner_boot(argv: list[str] | None) -> None:
+    """在所有业务 import 之后、解析 argparse 之前打第一行 JSON 到 stderr 并 flush。
+
+    这一行不依赖任何 robot_dh 内部模块，是 Argo step pod 0B archive log 的兜底
+    诊断信号——只要这条 print 出现在 archive log 顶部，就能证明 python 解释器至少
+    成功跑到了 ``main()`` 入口；如果 archive log 仍然 0B，那就是 image 启动 /
+    runtime hook 层面的问题，与业务代码无关。
+
+    **必须**走 stderr：很多 CLI 子命令 stdout 是结构化 JSON 给下游消费（``_print_json``），
+    不能在前面塞额外 JSON 把"整段 stdout 都是合法 JSON"的契约破坏。K8s container log
+    合并 stdout+stderr，archive log 一样能抓到。
+    """
+    import sys
+    import time
+
+    try:
+        payload = {
+            "event": "runner_boot",
+            "argv": list(argv) if argv is not None else sys.argv[1:],
+            "python": sys.version.split()[0],
+            "ts": time.time(),
+            "env_keys": sorted(k for k in os.environ if k.startswith("ROBOT_DH_")),
+        }
+        print(json.dumps(payload, ensure_ascii=False), file=sys.stderr, flush=True)
+    except Exception:
+        # 兜底自己不能再爆错；让 main 继续走
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _emit_runner_boot(argv)
+    try:
+        return _main_impl(argv)
+    except SystemExit:
+        raise
+    except BaseException:
+        # 任何未捕获异常（含 KeyboardInterrupt / 子线程冒上来的 OOM）都至少留下 traceback,
+        # 让 Argo archive log 不再是 0B。重抛交给上层默认 stderr 路径。
+        import sys
+        import traceback
+
+        traceback.print_exc()
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        raise
+
+
+def _main_impl(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     configure_logging(log_format=getattr(args, "log_format", "human"))
@@ -418,6 +616,12 @@ def main(argv: list[str] | None = None) -> int:
             version=args.version,
             job_id=args.job_id,
             lake_root_uri=args.lake_root,
+            resume=getattr(args, "resume", True),
+            force=getattr(args, "force", False),
+            heartbeat_interval_sec=getattr(args, "heartbeat_interval_sec", 30.0),
+            progress_log_interval_sec=getattr(args, "progress_log_interval_sec", 30.0),
+            workflow_name=getattr(args, "workflow_name", None),
+            perf_dir=getattr(args, "perf_dir", None),
         )
         _print_json({
             "dataset_id": result.dataset_id,
@@ -428,6 +632,8 @@ def main(argv: list[str] | None = None) -> int:
             "duration_sec": result.duration_sec,
             "job_id": result.job_id,
             "job_duration_sec": result.duration_job_sec,
+            "status": result.status,
+            "completed_steps": result.completed_steps,
         })
         return 0
 
@@ -482,6 +688,13 @@ def main(argv: list[str] | None = None) -> int:
                 ads_config_path=args.ads_config,
                 job_id=args.job_id,
                 summary_dir=args.summary_dir,
+                phase=getattr(args, "phase", "all"),
+                resume=getattr(args, "resume", True),
+                force=getattr(args, "force", False),
+                heartbeat_interval_sec=getattr(args, "heartbeat_interval_sec", 30.0),
+                progress_log_interval_sec=getattr(args, "progress_log_interval_sec", 30.0),
+                workflow_name=getattr(args, "workflow_name", None),
+                perf_dir=args.perf_dir,
             )
             try:
                 input_bytes_estimate = measure_uri_bytes(args.dataset)
@@ -580,6 +793,330 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 0
 
+    if args.command == "ml-ready":
+        from robot_dh.ml_ready import export_ml_ready as _export_ml_ready
+        from robot_dh.warehouse.robot_platform import PlatformWarehouse
+
+        if args.ml_ready_command == "export":
+            try:
+                split_parts = tuple(float(x) for x in args.split.split(","))
+            except ValueError:
+                print(f"invalid --split={args.split!r}")
+                return 1
+            if len(split_parts) != 3:
+                print(f"--split expects 3 floats; got {split_parts}")
+                return 1
+            family_filter = None
+            if args.dataset_family and args.dataset_family != "all":
+                family_filter = [s.strip() for s in args.dataset_family.split(",") if s.strip()]
+            result = _export_ml_ready(
+                input_root=args.input_root,
+                output_uri=args.output,
+                quality_root=args.quality_root,
+                qc_root=args.qc_root,
+                dataset_id=args.dataset_id,
+                version=args.version,
+                quality_threshold=args.quality_threshold,
+                split=(split_parts[0], split_parts[1], split_parts[2]),
+                family_filter=family_filter,
+                min_episode_length=args.min_episode_length,
+            )
+            wh_plat = PlatformWarehouse(soft=True)
+            wh_plat.record_ml_ready_dataset(
+                dataset_id=result.dataset_id,
+                version=result.version,
+                output_uri=result.output_uri,
+                train_uri=result.train_uri,
+                val_uri=result.val_uri,
+                test_uri=result.test_uri,
+                dataset_card_uri=result.dataset_card_uri,
+                feature_schema_uri=result.feature_schema_uri,
+                quality_filter_uri=result.quality_filter_uri,
+                lineage_uri=result.lineage_uri,
+                quality_threshold=args.quality_threshold,
+                num_train=result.num_train,
+                num_val=result.num_val,
+                num_test=result.num_test,
+                status="OK",
+                metrics=result.metrics,
+            )
+            _print_json(result.to_dict())
+            return 0
+        if args.ml_ready_command == "list":
+            wh_plat = PlatformWarehouse(soft=False)
+            try:
+                rows = wh_plat.list_ml_ready_datasets()
+            except Exception as err:
+                print(f"DB unavailable: {err}")
+                return 1
+            _print_json(rows)
+            return 0
+        if args.ml_ready_command == "show":
+            wh_plat = PlatformWarehouse(soft=False)
+            try:
+                row = wh_plat.get_ml_ready_dataset(dataset_id=args.dataset_id, version=args.version)
+            except Exception as err:
+                print(f"DB unavailable: {err}")
+                return 1
+            if row is None:
+                print("not found")
+                return 1
+            _print_json(row)
+            return 0
+        parser.print_help()
+        return 0
+
+    if args.command == "qc":
+        from robot_dh.qc import (
+            list_contracts as _list_contracts,
+            run_contract as _run_contract,
+            profile_dataset as _profile_dataset,
+            write_report as _write_report,
+        )
+        from robot_dh.warehouse.robot_platform import PlatformWarehouse
+
+        if args.qc_command == "contract":
+            if args.qc_contract_command == "list":
+                _print_json(_list_contracts())
+                return 0
+            if args.qc_contract_command == "run":
+                report, profile = _run_contract(
+                    dataset_uri=args.dataset_uri,
+                    dataset_family=args.dataset_family,
+                    dataset_id=args.dataset_id,
+                    version=args.version,
+                    layer=args.layer,
+                )
+                artifacts = _write_report(report=report, profile=profile, output_uri=args.output)
+                wh_plat = PlatformWarehouse(soft=True)
+                wh_plat.upsert_qc_contract(
+                    contract_id=report.contract_id,
+                    dataset_family=report.dataset_family,
+                    version="v1",
+                    rules={"items": [r.to_dict() for r in (lambda: __import__("robot_dh.qc.registry", fromlist=["get_contract_runner"]).get_contract_runner(report.dataset_family))()[0]]},
+                )
+                wh_plat.record_qc_contract_run(
+                    run_id=report.run_id,
+                    contract_id=report.contract_id,
+                    status=report.status,
+                    dataset_id=report.dataset_id,
+                    version=report.version,
+                    dataset_family=report.dataset_family,
+                    dataset_uri=report.dataset_uri,
+                    duration_sec=report.duration_sec,
+                    metrics=report.metrics,
+                    failed_rules=report.failed_rules,
+                    warning_rules=report.warning_rules,
+                    artifacts_uri=artifacts.get("report_uri"),
+                )
+                wh_plat.record_asset_profile(
+                    profile_id=profile.profile_id,
+                    asset_uri=profile.asset_uri,
+                    dataset_id=profile.dataset_id,
+                    version=profile.version,
+                    dataset_family=profile.dataset_family,
+                    asset_format=profile.asset_format,
+                    layer=profile.layer,
+                    bytes_=profile.bytes,
+                    rows=profile.rows,
+                    files_count=profile.files_count,
+                    episodes_count=profile.episodes_count,
+                    videos_count=profile.videos_count,
+                    schema_hash=profile.schema_hash,
+                    null_rate=profile.null_rate,
+                    profile=profile.profile,
+                    status=profile.status,
+                )
+                _print_json({
+                    "run_id": report.run_id,
+                    "contract_id": report.contract_id,
+                    "status": report.status,
+                    "artifacts": artifacts,
+                    "metrics": report.metrics,
+                })
+                return 0 if report.status != "FAIL" else 1
+            parser.print_help()
+            return 0
+        if args.qc_command == "profile":
+            profile = _profile_dataset(
+                dataset_uri=args.dataset_uri,
+                dataset_id=args.dataset_id,
+                version=args.version,
+                dataset_family=args.dataset_family,
+            )
+            from robot_dh.lake.store import create_lake_store as _cs
+            from robot_dh.lake.uri import join_uri as _ju
+            store = _cs(args.output)
+            uri = _ju(args.output, "asset_profile.json")
+            store.write_json(uri, profile.to_dict())
+            wh_plat = PlatformWarehouse(soft=True)
+            wh_plat.record_asset_profile(
+                profile_id=profile.profile_id,
+                asset_uri=profile.asset_uri,
+                dataset_id=profile.dataset_id,
+                version=profile.version,
+                dataset_family=profile.dataset_family,
+                asset_format=profile.asset_format,
+                bytes_=profile.bytes,
+                rows=profile.rows,
+                files_count=profile.files_count,
+                episodes_count=profile.episodes_count,
+                videos_count=profile.videos_count,
+                schema_hash=profile.schema_hash,
+                null_rate=profile.null_rate,
+                profile=profile.profile,
+                status=profile.status,
+            )
+            _print_json({"profile_uri": uri, "profile": profile.to_dict()})
+            return 0
+        if args.qc_command == "report":
+            from robot_dh.lake.store import create_lake_store as _cs
+            store = _cs(args.input)
+            payload = store.read_json(args.input)
+            print("contract_id:", payload.get("contract_id"))
+            print("status:", payload.get("status"))
+            print("failed_rules:", len(payload.get("failed_rules") or []))
+            print("warning_rules:", len(payload.get("warning_rules") or []))
+            for r in payload.get("rules") or []:
+                print(f"  [{r['status']}] {r['rule_id']} {r['metric']} {r['op']} {r['threshold']} actual={r['actual']}")
+            return 0
+        parser.print_help()
+        return 0
+
+    if args.command == "partition":
+        from robot_dh.partition import plan_dataset_partitions
+        from robot_dh.partition.models import PartitionPlan
+        from robot_dh.warehouse.robot_platform import PlatformWarehouse
+
+        if args.partition_command == "plan":
+            plan = plan_dataset_partitions(
+                dataset_uri=args.dataset,
+                dataset_id=args.dataset_id,
+                version=args.version,
+                target_partition_size_gb=args.target_partition_size_gb,
+                family_hint=args.family,
+            )
+            output_path = write_json_uri(args.output, plan.to_dict())
+            wh_plat = PlatformWarehouse(soft=True)
+            for part in plan.partitions:
+                wh_plat.record_dataset_partition(
+                    partition_id=part.partition_id,
+                    dataset_id=plan.dataset_id,
+                    version=plan.version,
+                    dataset_uri=plan.dataset_uri,
+                    partition_type=plan.partition_type,
+                    partition_index=part.partition_index,
+                    partition_uri=part.partition_uri,
+                    dataset_family=plan.dataset_family,
+                    input_bytes=part.input_bytes,
+                    estimated_rows=part.estimated_rows,
+                    status="PLANNED",
+                    metrics=part.metrics,
+                )
+            _print_json({"plan_path": output_path, "plan": plan.to_dict()})
+            return 0
+        if args.partition_command == "list":
+            payload = read_json_uri(args.plan)
+            plan = PartitionPlan.from_dict(payload)
+            _print_json(plan.to_dict())
+            return 0
+        if args.partition_command == "run-normalize":
+            payload = read_json_uri(args.plan)
+            plan = PartitionPlan.from_dict(payload)
+            if args.partition_index < 0 or args.partition_index >= len(plan.partitions):
+                print(f"partition_index out of range: {args.partition_index} (n={len(plan.partitions)})")
+                return 1
+            partition = plan.partitions[args.partition_index]
+            wh_plat = PlatformWarehouse(soft=True)
+            wh_plat.record_dataset_partition(
+                partition_id=partition.partition_id,
+                dataset_id=plan.dataset_id,
+                version=plan.version,
+                dataset_uri=plan.dataset_uri,
+                partition_type=plan.partition_type,
+                partition_index=partition.partition_index,
+                partition_uri=partition.partition_uri,
+                dataset_family=plan.dataset_family,
+                input_bytes=partition.input_bytes,
+                estimated_rows=partition.estimated_rows,
+                status="RUNNING",
+            )
+            result = normalize_dataset(
+                dataset_uri=partition.partition_uri or partition.dataset_uri,
+                output_uri=args.output,
+                dataset_id=plan.dataset_id,
+                version=plan.version,
+                lake_root_uri=args.lake_root,
+                resume=args.resume,
+                force=args.force,
+                heartbeat_interval_sec=args.heartbeat_interval_sec,
+                progress_log_interval_sec=args.progress_log_interval_sec,
+                warehouse_v16=wh_plat,
+            )
+            wh_plat.record_dataset_partition(
+                partition_id=partition.partition_id,
+                dataset_id=plan.dataset_id,
+                version=plan.version,
+                dataset_uri=plan.dataset_uri,
+                partition_type=plan.partition_type,
+                partition_index=partition.partition_index,
+                partition_uri=args.output,
+                dataset_family=plan.dataset_family,
+                input_bytes=partition.input_bytes,
+                estimated_rows=partition.estimated_rows,
+                status="OK" if result.status in {"OK", "RESUMED", "SKIPPED"} else "FAIL",
+                metrics={"manifest_uri": result.manifest_uri, "num_samples": result.num_samples},
+            )
+            _print_json({
+                "partition_id": partition.partition_id,
+                "output_uri": result.output_uri,
+                "manifest_uri": result.manifest_uri,
+                "status": result.status,
+                "num_samples": result.num_samples,
+            })
+            return 0
+        parser.print_help()
+        return 0
+
+    if args.command == "argo":
+        from robot_dh.argo import sync_workflow, sync_from_kubectl
+        if args.argo_command == "sync":
+            try:
+                if args.from_json:
+                    payload = json.loads(args.from_json.read_text())
+                    result = sync_workflow(payload=payload)
+                else:
+                    result = sync_from_kubectl(args.workflow_name, namespace=args.namespace)
+            except Exception as err:
+                print(f"argo sync failed: {err}")
+                return 1
+            _print_json({
+                "workflow_name": result.workflow_name,
+                "workflow_namespace": result.workflow_namespace,
+                "status": result.status,
+                "steps": result.steps,
+            })
+            return 0
+        parser.print_help()
+        return 0
+
+    if args.command == "lineage":
+        from robot_dh.lineage import build_lineage_report, write_lineage_report
+        if args.lineage_command == "report":
+            report = build_lineage_report(
+                workflow_name=args.workflow_name,
+                workflow_namespace=args.namespace,
+            )
+            uri = write_lineage_report(report, args.output)
+            _print_json({"lineage_report_uri": uri, "summary": {
+                "workflow_status": report.workflow_status,
+                "steps_total": report.steps_total,
+                "steps_failed": report.steps_failed,
+            }})
+            return 0
+        parser.print_help()
+        return 0
+
     if args.command == "mutate":
         target = apply_mutation(
             source_dataset=args.dataset,
@@ -587,6 +1124,18 @@ def main(argv: list[str] | None = None) -> int:
             mutation=args.mutation,
         )
         _print_json({"output": target.as_posix(), "mutation": args.mutation})
+        return 0
+
+    if args.command == "perf":
+        if args.perf_command == "reingest-pending":
+            stats = reingest_pending_perf_records(
+                pending_dir=args.pending_dir,
+                archive_dir=args.archive_dir,
+                dry_run=args.dry_run,
+            )
+            _print_json(stats)
+            return 0 if stats["failed"] == 0 else 1
+        parser.print_help()
         return 0
 
     if args.command == "benchmark":

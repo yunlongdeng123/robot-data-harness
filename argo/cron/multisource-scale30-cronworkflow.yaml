@@ -1,0 +1,17 @@
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: robot-dh-multisource-scale30-cron
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: v1-6-argo
+spec:
+  # 每天 UTC 02:00（北京 10:00）
+  schedule: "0 2 * * *"
+  timezone: "UTC"
+  concurrencyPolicy: "Forbid"
+  startingDeadlineSeconds: 600
+  workflowSpec:
+    workflowTemplateRef:
+      name: robot-dh-multisource-scale30

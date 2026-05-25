@@ -1,0 +1,25 @@
+contract_id: universal_v1
+dataset_family: universal
+version: v1
+description: 任何 dataset 都应满足的最小约束
+rules:
+  - rule_id: object_count_min
+    metric: files_count
+    op: ">="
+    threshold: 1
+    severity: fail
+  - rule_id: empty_files_count
+    metric: empty_file_count
+    op: "<="
+    threshold: 0
+    severity: warn
+  - rule_id: parquet_readable_rate
+    metric: readable_parquet_rate
+    op: ">="
+    threshold: 0.95
+    severity: warn
+  - rule_id: video_decode_pass_rate
+    metric: video_decode_pass_rate
+    op: ">="
+    threshold: 0.9
+    severity: warn

@@ -1,0 +1,27 @@
+{
+  "dataset_id": "bridgedata_v2_scale30",
+  "version": "v1",
+  "layer": "raw-sample",
+  "source_repo": "mbodiai/oxe_bridge_v2",
+  "source_uri": "s3://robot-datasets/raw/bridgedata_v2_scale30/v1/data/shard_0-00000-of-00001.parquet",
+  "sample_strategy": "first 20 rows of each episode_idx in {0, 1}, image bytes nulled",
+  "sample": {
+    "path": "shard_0-sample.parquet",
+    "rows": 40,
+    "episodes": [
+      0,
+      1
+    ],
+    "size_bytes": 32377,
+    "sha256": "6648a8b0d8ddfde0bb7701915aba7f05d6190e93fb9d53bb9876f4e4026be6dd"
+  },
+  "full_source": {
+    "rows": 314,
+    "episodes": [
+      0,
+      1,
+      2
+    ],
+    "size_mib": 227.39113426208496
+  }
+}

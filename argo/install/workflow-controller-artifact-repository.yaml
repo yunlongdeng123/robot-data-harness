@@ -1,0 +1,35 @@
+# Argo workflow-controller artifactRepository patch（v1.6 log archive 需求）
+#
+# 作用：让 controller 在 step pod 进入终态时，把 stdout/stderr 上传到云端 MinIO 的
+#       robot-dh-artifacts/argo-logs/<ns>/<workflow.name>/<pod.name>/main.log
+# 背景：详见 docs/v1_6_argo_log_archive_request.md（来自 robot-dh-infra 的需求）
+#
+# 注意：
+#   - 本文件只是 patch 模板。controller 自己的 ConfigMap 由 quick-start-minimal.yaml
+#     创建（见 argo/scripts/argo_install.sh），里面默认包含 minio test bucket。
+#     真正的 apply 由 argo/scripts/argo_apply_log_archive.sh 用 kubectl patch
+#     做 strategic merge，避免与 quick-start-minimal 的其它字段冲突。
+#   - endpoint / accessKey / secretKey 不写在这里，由 apply 脚本从
+#     robot-dh/robot-dh-v1-6-secrets 读 ROBOT_DH_S3_ENDPOINT_URL，
+#     再渲染到 ConfigMap data.artifactRepository。
+#   - bucket / keyFormat 与 robot-dh-infra 的需求（docs/v1_6_argo_log_archive_request.md §4）
+#     保持一致；改动需双方同步。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: workflow-controller-configmap
+  namespace: argo
+data:
+  artifactRepository: |
+    archiveLogs: true
+    s3:
+      endpoint: __ROBOT_DH_S3_ENDPOINT_HOSTPORT__
+      bucket: robot-dh-artifacts
+      keyFormat: "argo-logs/{{workflow.namespace}}/{{workflow.name}}/{{pod.name}}/main.log"
+      insecure: __ROBOT_DH_S3_INSECURE__
+      accessKeySecret:
+        name: robot-dh-v1-6-secrets
+        key: ROBOT_DH_S3_ACCESS_KEY
+      secretKeySecret:
+        name: robot-dh-v1-6-secrets
+        key: ROBOT_DH_S3_SECRET_KEY

@@ -1,0 +1,14 @@
+# v1.6 runtime config：normalize / etl run --phase 默认参数。
+# 真实生产由 Argo workflow yaml 覆盖；本地 CLI 默认从这里读。
+
+runtime:
+  heartbeat_interval_sec: 30
+  progress_log_interval_sec: 30
+
+normalize:
+  # 是否默认开启 resume；--no-resume 可关闭
+  resume: true
+  force: false
+
+partition:
+  target_partition_size_gb: 2.0

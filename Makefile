@@ -35,6 +35,8 @@ DATASETS_BUCKET_REMOTE ?= robot-datasets
         argo-install argo-status argo-ui-port-forward argo-apply-rbac argo-apply-templates \
         argo-submit-scale-etl argo-submit-benchmark argo-submit-build-ads argo-apply-cron \
         argo-list argo-logs argo-delete-completed k8s-apply-v1-5-secret-example \
+        argo-sync-log-archive-secret argo-apply-log-archive \
+        argo-verify-log-archive argo-enable-log-archive \
         exporter-build exporter-test exporter-run exporter-docker-build exporter-kind-load \
         exporter-k8s-apply exporter-port-forward exporter-logs
 
@@ -379,6 +381,33 @@ argo-logs:
 argo-delete-completed:
 	./argo/scripts/argo_delete_completed.sh
 
+# ---------- v1.6 Argo log archive（来自 robot-dh-infra 的需求） ----------
+# 详见 docs/v1_6_argo_log_archive_request.md（接收方文档）和
+# docs/v1_6_argo_log_archive_handoff.md（完成回执）。
+
+.PHONY: argo-sync-log-archive-secret argo-apply-log-archive \
+        argo-verify-log-archive argo-enable-log-archive
+
+# 把 robot-dh/robot-dh-v1-6-secrets 同步到 argo namespace（仅 S3 access/secret key）
+argo-sync-log-archive-secret:
+	./argo/scripts/argo_sync_log_archive_secret.sh
+
+# 把 archiveLogs + s3 渲染并 patch 进 argo/workflow-controller-configmap，
+# 然后 rollout restart deploy/workflow-controller
+argo-apply-log-archive:
+	./argo/scripts/argo_apply_log_archive.sh
+
+# 验证 ConfigMap + Secret；加 CHECK_OBJECTS=1 还会用 mc 列 argo-logs/
+argo-verify-log-archive:
+	@if [ "$${CHECK_OBJECTS:-0}" = "1" ]; then \
+		./argo/scripts/argo_verify_log_archive.sh --check-objects; \
+	else \
+		./argo/scripts/argo_verify_log_archive.sh; \
+	fi
+
+# 一次跑完三步：sync secret -> apply configmap -> verify
+argo-enable-log-archive: argo-sync-log-archive-secret argo-apply-log-archive argo-verify-log-archive
+
 # ---------- v1.5 robot-dh-exporter (Go) ----------
 
 EXPORTER_DIR ?= go/robot-dh-exporter
@@ -410,3 +439,76 @@ exporter-port-forward:
 
 exporter-logs:
 	kubectl -n robot-dh logs deploy/robot-dh-exporter --tail=200
+
+
+# ---------- robot platform DAG（多源 Argo Workflow）----------
+
+# 命名空间复用上面已定义的 ROBOT_DH_NS
+
+.PHONY: argo-apply-platform argo-submit-multisource-scale30 argo-submit-contract-qc \
+        argo-submit-ml-ready argo-sync-latest argo-platform-logs argo-platform-tail \
+        argo-platform-status platform-smoke
+
+argo-apply-platform:
+	kubectl apply -f argo/templates/robot-dh-multisource-scale30-workflowtemplate.yaml
+	kubectl apply -f argo/templates/robot-dh-contract-qc-workflowtemplate.yaml
+	kubectl apply -f argo/templates/robot-dh-ml-ready-workflowtemplate.yaml
+	kubectl apply -f argo/cron/multisource-scale30-cronworkflow.yaml
+
+argo-submit-multisource-scale30:
+	./scripts/argo_submit_multisource_scale30.sh
+
+argo-submit-contract-qc:
+	kubectl -n $(ROBOT_DH_NS) create -f argo/workflows/submit-contract-qc.yaml
+
+argo-submit-ml-ready:
+	kubectl -n $(ROBOT_DH_NS) create -f argo/workflows/submit-ml-ready.yaml
+
+argo-sync-latest:
+	./scripts/argo_sync_latest.sh
+
+argo-platform-logs:
+	@latest=$$(kubectl -n $(ROBOT_DH_NS) get workflows.argoproj.io \
+		--sort-by=.metadata.creationTimestamp \
+		-o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null); \
+	if [ -z "$$latest" ]; then \
+		echo "命名空间 $(ROBOT_DH_NS) 中未发现 robot platform Workflow"; \
+		exit 1; \
+	fi; \
+	container="$${LOG_CONTAINER:-main}"; \
+	echo "[argo-platform-logs] workflow=$$latest container=$$container (LOG_CONTAINER 覆盖；wait/init 用于排查 executor)"; \
+	kubectl -n $(ROBOT_DH_NS) logs -l workflows.argoproj.io/workflow=$$latest \
+		-c "$$container" --tail=500 --prefix --max-log-requests=20
+
+argo-platform-tail:
+	@wf="$${WF:-}"; \
+	if [ -z "$$wf" ]; then \
+		wf=$$(kubectl -n $(ROBOT_DH_NS) get workflows.argoproj.io \
+			--sort-by=.metadata.creationTimestamp \
+			-o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null); \
+	fi; \
+	if [ -z "$$wf" ]; then \
+		echo "命名空间 $(ROBOT_DH_NS) 中未发现 robot platform Workflow"; \
+		exit 1; \
+	fi; \
+	container="$${LOG_CONTAINER:-main}"; \
+	echo "[argo-platform-tail] workflow=$$wf container=$$container follow=on"; \
+	echo "  注意：kubectl -f 不会自动追入 stream 之后才创建的 step pod，需要 rerun 本目标。"; \
+	kubectl -n $(ROBOT_DH_NS) logs -f \
+		-l workflows.argoproj.io/workflow=$$wf \
+		-c "$$container" --tail=200 --prefix --max-log-requests=20
+
+argo-platform-status:
+	kubectl -n $(ROBOT_DH_NS) get workflows.argoproj.io,workflowtemplates.argoproj.io,cronworkflows.argoproj.io
+
+platform-smoke:
+	@echo "[platform smoke]"
+	@kubectl -n $(ROBOT_DH_NS) get secret robot-dh-v1-6-secrets >/dev/null 2>&1 \
+		&& echo "  secret: present" \
+		|| echo "  secret: MISSING (run scripts/k8s_create_platform_secret_from_env.sh)"
+	@kubectl -n $(ROBOT_DH_NS) get workflowtemplate robot-dh-multisource-scale30 >/dev/null 2>&1 \
+		&& echo "  workflowtemplate: present" \
+		|| echo "  workflowtemplate: MISSING (run make argo-apply-platform)"
+	@docker images robot-data-harness:local --format="  image: {{.Repository}}:{{.Tag}} {{.CreatedSince}}" 2>/dev/null \
+		|| echo "  image: MISSING (run make docker-build)"
+	@echo "  -> 上述条件齐备后：make argo-submit-multisource-scale30"
