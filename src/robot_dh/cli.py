@@ -180,6 +180,9 @@ def build_parser() -> argparse.ArgumentParser:
     ads_parser.add_argument("--config", type=Path, default=Path("configs/etl_default.yaml"))
     ads_parser.add_argument("--lake-root", type=str, default=None)
     ads_parser.add_argument("--job-id", type=str, default=None)
+    # 与其他子命令对齐；当前实现始终走 _print_json，"human" 仅占位，避免 v1.7
+    # local devscale workflow 模板的 `--log-format json` 触发 argparse error。
+    ads_parser.add_argument("--log-format", choices=("human", "json"), default="human")
 
     etl_parser = subparsers.add_parser("etl", help="v1.4 ETL orchestration")
     etl_subparsers = etl_parser.add_subparsers(dest="etl_command")
@@ -290,6 +293,19 @@ def build_parser() -> argparse.ArgumentParser:
     qc_contract_run_parser.add_argument("--contract", type=Path, default=None)
     qc_contract_run_parser.add_argument("--layer", type=str, default=None)
     qc_contract_run_parser.add_argument("--log-format", choices=("human", "json"), default="human")
+    # v1.7：bridge / robomimic 容灾参数；统一转成 env，下沉到 profile.py / parquet_probe.py / hdf5_probe.py
+    qc_contract_run_parser.add_argument("--max-workers", type=int, default=None,
+        help="HDF5 / parquet 探针并发；映射到 ROBOT_DH_QC_PROBE_CONCURRENCY")
+    qc_contract_run_parser.add_argument("--file-timeout-sec", type=float, default=None,
+        help="单文件探针硬 timeout（秒），robomimic 路径生效；映射到 ROBOT_DH_QC_FILE_TIMEOUT_SEC")
+    qc_contract_run_parser.add_argument("--probe-timeout-sec", type=float, default=None,
+        help="bridge 远端 lazy probe 硬 timeout（秒）；映射到 ROBOT_DH_QC_PROBE_TIMEOUT_SEC")
+    qc_contract_run_parser.add_argument("--max-retries", type=int, default=None,
+        help="bridge / robomimic 远端 probe 最大重试；映射到 ROBOT_DH_QC_MAX_RETRIES")
+    qc_contract_run_parser.add_argument("--disable-remote-lazy", action="store_true",
+        help="bridge：禁用 S3 lazy 探针（仅本地 file URI 可用）；映射到 ROBOT_DH_QC_DISABLE_REMOTE_LAZY=1")
+    qc_contract_run_parser.add_argument("--fail-fast", action="store_true",
+        help="任一文件探针失败立即终止；映射到 ROBOT_DH_QC_FAIL_FAST=1")
 
     qc_profile_parser = qc_subparsers.add_parser("profile", help="Profile a dataset (asset_profile.json only)")
     qc_profile_parser.add_argument("--dataset-uri", type=str, required=True)
@@ -334,7 +350,7 @@ def build_parser() -> argparse.ArgumentParser:
     partition_run_normalize_parser.add_argument("--force", action="store_true")
     partition_run_normalize_parser.add_argument("--log-format", choices=("human", "json"), default="human")
 
-    # v1.6.4: argo sync / lineage report
+    # v1.6.4: argo sync / lineage report ; v1.7 argo logs index
     argo_parser = subparsers.add_parser("argo", help="v1.6 Argo workflow metadata sync")
     argo_subparsers = argo_parser.add_subparsers(dest="argo_command")
     argo_sync_parser = argo_subparsers.add_parser("sync", help="Sync workflow status from kubectl into PG")
@@ -343,6 +359,95 @@ def build_parser() -> argparse.ArgumentParser:
     argo_sync_parser.add_argument("--from-json", type=Path, default=None,
         help="Read workflow JSON from a local file instead of calling kubectl")
     argo_sync_parser.add_argument("--log-format", choices=("human", "json"), default="human")
+
+    argo_logs_parser = argo_subparsers.add_parser("logs", help="v1.7 archive log index operations")
+    argo_logs_sub = argo_logs_parser.add_subparsers(dest="argo_logs_command")
+    argo_logs_index_parser = argo_logs_sub.add_parser(
+        "index", help="Derive archive_log_uri per step from workflow JSON and write into PG workflow_steps.metrics"
+    )
+    argo_logs_index_parser.add_argument("--workflow-name", type=str, required=True)
+    argo_logs_index_parser.add_argument("--namespace", type=str, default="robot-dh")
+    argo_logs_index_parser.add_argument("--archive-root", type=str,
+        default="s3://robot-dh-artifacts/argo-logs")
+    argo_logs_index_parser.add_argument("--container-name", type=str, default="main")
+    argo_logs_index_parser.add_argument("--from-json", type=Path, default=None,
+        help="Read workflow JSON from a local file instead of calling kubectl")
+    argo_logs_index_parser.add_argument("--dry-run", action="store_true")
+    argo_logs_index_parser.add_argument("--log-format", choices=("human", "json"), default="human")
+
+    # v1.7: local runtime / datasets
+    local_parser = subparsers.add_parser("local", help="v1.7 local-first runtime commands")
+    local_subparsers = local_parser.add_subparsers(dest="local_command")
+
+    local_runtime_parser = local_subparsers.add_parser("runtime", help="local runtime config / doctor")
+    local_runtime_sub = local_runtime_parser.add_subparsers(dest="local_runtime_command")
+    local_runtime_doctor_parser = local_runtime_sub.add_parser(
+        "doctor", help="Health-check local data root, devscale manifests, total size",
+    )
+    local_runtime_doctor_parser.add_argument("--config", type=Path,
+        default=Path("configs/devscale_runtime.yaml"))
+    local_runtime_doctor_parser.add_argument("--devscale-config", type=Path,
+        default=Path("configs/devscale_datasets.yaml"))
+    local_runtime_doctor_parser.add_argument("--allow-over-limit", action="store_true")
+    local_runtime_doctor_parser.add_argument("--log-format", choices=("human", "json"), default="human")
+
+    local_datasets_parser = local_subparsers.add_parser("datasets", help="devscale datasets")
+    local_datasets_sub = local_datasets_parser.add_subparsers(dest="local_datasets_command")
+    local_datasets_list = local_datasets_sub.add_parser("list", help="List devscale datasets")
+    local_datasets_list.add_argument("--config", type=Path,
+        default=Path("configs/devscale_runtime.yaml"))
+    local_datasets_list.add_argument("--devscale-config", type=Path,
+        default=Path("configs/devscale_datasets.yaml"))
+    local_datasets_list.add_argument("--log-format", choices=("human", "json"), default="human")
+    local_datasets_verify = local_datasets_sub.add_parser("verify",
+        help="Verify devscale datasets against plan / manifest")
+    local_datasets_verify.add_argument("--config", type=Path,
+        default=Path("configs/devscale_runtime.yaml"))
+    local_datasets_verify.add_argument("--devscale-config", type=Path,
+        default=Path("configs/devscale_datasets.yaml"))
+    local_datasets_verify.add_argument("--plan", type=Path, default=None,
+        help="manifests/devscale_plan.json; if omitted, fallback to per-dataset _manifest.json")
+    local_datasets_verify.add_argument("--log-format", choices=("human", "json"), default="human")
+
+    # v1.7: adapter detect / probe / list
+    adapter_parser = subparsers.add_parser("adapter", help="v1.7 dataset adapter registry")
+    adapter_subparsers = adapter_parser.add_subparsers(dest="adapter_command")
+    adapter_subparsers.add_parser("list", help="List registered adapter families")
+    adapter_detect_parser = adapter_subparsers.add_parser("detect",
+        help="Detect best adapter for a dataset URI")
+    adapter_detect_parser.add_argument("--dataset-uri", type=str, required=True)
+    adapter_detect_parser.add_argument("--dataset-id", type=str, default=None)
+    adapter_detect_parser.add_argument("--all", action="store_true",
+        help="Print confidence of every adapter")
+    adapter_detect_parser.add_argument("--log-format", choices=("human", "json"), default="human")
+    adapter_probe_parser = adapter_subparsers.add_parser("probe",
+        help="Probe a dataset via adapter (schema / file counts / errors)")
+    adapter_probe_parser.add_argument("--dataset-uri", type=str, required=True)
+    adapter_probe_parser.add_argument("--dataset-id", type=str, default=None)
+    adapter_probe_parser.add_argument("--family", type=str, default=None,
+        help="Override detected family; defaults to detect_adapter")
+    adapter_probe_parser.add_argument("--sample-limit", type=int, default=32)
+    adapter_probe_parser.add_argument("--option", action="append", default=[],
+        help="Adapter probe option in key=value form (e.g. probe_timeout_sec=60)")
+    adapter_probe_parser.add_argument("--log-format", choices=("human", "json"), default="human")
+
+    # v1.7: runtime heartbeat check
+    runtime_parser = subparsers.add_parser("runtime", help="v1.7 runtime utilities")
+    runtime_subparsers = runtime_parser.add_subparsers(dest="runtime_command")
+    runtime_heartbeat = runtime_subparsers.add_parser("heartbeat", help="heartbeat utilities")
+    runtime_heartbeat_sub = runtime_heartbeat.add_subparsers(dest="runtime_heartbeat_command")
+    runtime_heartbeat_check = runtime_heartbeat_sub.add_parser(
+        "check", help="Check whether any phase heartbeat is stale",
+    )
+    runtime_heartbeat_check.add_argument("--workflow-name", type=str, default=None)
+    runtime_heartbeat_check.add_argument("--stale-after-sec", type=float, default=300.0)
+    runtime_heartbeat_check.add_argument("--warn-after-sec", type=float, default=120.0)
+    runtime_heartbeat_check.add_argument("--events-dir", type=Path, default=None,
+        help="Override ROBOT_DH_EVENTS_DIR / runs/events")
+    runtime_heartbeat_check.add_argument("--log-format", choices=("human", "json"), default="human")
+    runtime_heartbeat_check.add_argument("--fail-on", choices=("warn", "stale", "never"),
+        default="stale",
+        help="Exit non-zero when overall status reaches the threshold (default stale)")
 
     lineage_parser = subparsers.add_parser("lineage", help="v1.6 lineage report")
     lineage_subparsers = lineage_parser.add_subparsers(dest="lineage_command")
@@ -364,7 +469,8 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark_subparsers = benchmark_parser.add_subparsers(dest="benchmark_command")
     benchmark_run_parser = benchmark_subparsers.add_parser("run", help="Run a benchmark suite")
     benchmark_run_parser.add_argument("--suite", type=Path, required=True)
-    benchmark_run_parser.add_argument("--output", type=Path, required=True)
+    # 接 file:// 或裸路径，由 to_local_path 统一解析；v1.7 模板传 file:///...
+    benchmark_run_parser.add_argument("--output", type=str, required=True)
     benchmark_run_parser.add_argument("--record-to-registry", action="store_true")
     benchmark_run_parser.add_argument("--config", type=Path, default=Path("configs/button_press.yaml"))
     benchmark_run_parser.add_argument("--gate-policy", type=Path, default=None)
@@ -880,6 +986,19 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 _print_json(_list_contracts())
                 return 0
             if args.qc_contract_command == "run":
+                # v1.7：把 CLI 容灾参数翻译成 env，profile.py / parquet_probe.py / robomimic adapter 已能消费
+                if args.max_workers is not None:
+                    os.environ["ROBOT_DH_QC_PROBE_CONCURRENCY"] = str(max(1, args.max_workers))
+                if args.file_timeout_sec is not None:
+                    os.environ["ROBOT_DH_QC_FILE_TIMEOUT_SEC"] = str(args.file_timeout_sec)
+                if args.probe_timeout_sec is not None:
+                    os.environ["ROBOT_DH_QC_PROBE_TIMEOUT_SEC"] = str(args.probe_timeout_sec)
+                if args.max_retries is not None:
+                    os.environ["ROBOT_DH_QC_MAX_RETRIES"] = str(max(0, args.max_retries))
+                if args.disable_remote_lazy:
+                    os.environ["ROBOT_DH_QC_DISABLE_REMOTE_LAZY"] = "1"
+                if args.fail_fast:
+                    os.environ["ROBOT_DH_QC_FAIL_FAST"] = "1"
                 report, profile = _run_contract(
                     dataset_uri=args.dataset_uri,
                     dataset_family=args.dataset_family,
@@ -1097,6 +1216,143 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 "steps": result.steps,
             })
             return 0
+        if args.argo_command == "logs":
+            if args.argo_logs_command == "index":
+                from robot_dh.argo import index_archive_logs
+                try:
+                    result = index_archive_logs(
+                        workflow_name=args.workflow_name,
+                        namespace=args.namespace,
+                        archive_root=args.archive_root,
+                        container_name=args.container_name,
+                        from_json_path=args.from_json,
+                        dry_run=args.dry_run,
+                    )
+                except Exception as err:
+                    print(f"argo logs index failed: {err}")
+                    return 1
+                _print_json(result.to_dict())
+                return 0
+            parser.print_help()
+            return 0
+        parser.print_help()
+        return 0
+
+    if args.command == "local":
+        from robot_dh.local_runtime import (
+            load_runtime_config,
+            load_devscale_registry,
+            runtime_doctor,
+            verify_local_datasets,
+        )
+
+        if args.local_command == "runtime":
+            if args.local_runtime_command == "doctor":
+                cfg = load_runtime_config(config_path=args.config)
+                report = runtime_doctor(
+                    runtime_config=cfg,
+                    devscale_config_path=args.devscale_config,
+                    allow_over_limit=args.allow_over_limit,
+                )
+                _print_json(report.to_dict())
+                return 0 if report.status == "ok" else 1
+            parser.print_help()
+            return 0
+        if args.local_command == "datasets":
+            cfg = load_runtime_config(config_path=args.config)
+            registry = load_devscale_registry(
+                config_path=args.devscale_config, runtime_config=cfg,
+            )
+            if args.local_datasets_command == "list":
+                _print_json(registry.to_dict())
+                return 0
+            if args.local_datasets_command == "verify":
+                report = verify_local_datasets(registry=registry, plan_path=args.plan)
+                _print_json(report.to_dict())
+                return 0 if report.status == "ok" else 1
+            parser.print_help()
+            return 0
+        parser.print_help()
+        return 0
+
+    if args.command == "adapter":
+        from robot_dh.adapters import (
+            detect_adapter,
+            get_adapter,
+            list_adapters,
+            load_adapter_registry,
+        )
+
+        if args.adapter_command == "list":
+            reg = load_adapter_registry()
+            _print_json({
+                "families": list_adapters(),
+                "overrides": reg.yaml_overrides,
+            })
+            return 0
+        if args.adapter_command == "detect":
+            reg = load_adapter_registry()
+            if args.all:
+                results = reg.detect_all(args.dataset_uri, dataset_id=args.dataset_id)
+                _print_json([r.to_dict() for r in results])
+            else:
+                res = detect_adapter(args.dataset_uri, dataset_id=args.dataset_id)
+                _print_json(res.to_dict())
+            return 0
+        if args.adapter_command == "probe":
+            family = args.family
+            if not family:
+                det = detect_adapter(args.dataset_uri, dataset_id=args.dataset_id)
+                family = det.family
+            adapter = get_adapter(family)
+            options: dict[str, object] = {}
+            for kv in args.option or []:
+                if "=" not in kv:
+                    continue
+                k, v = kv.split("=", 1)
+                # 简易类型推断：bool / int / float / str
+                lower = v.lower()
+                if lower in ("true", "false"):
+                    options[k] = (lower == "true")
+                else:
+                    try:
+                        options[k] = int(v)
+                    except ValueError:
+                        try:
+                            options[k] = float(v)
+                        except ValueError:
+                            options[k] = v
+            result = adapter.probe(
+                args.dataset_uri,
+                sample_limit=args.sample_limit,
+                options=options,
+            )
+            _print_json(result.to_dict())
+            return 0 if result.status != "FAIL" else 1
+        parser.print_help()
+        return 0
+
+    if args.command == "runtime":
+        from robot_dh.progress.stale import check_stale_heartbeats
+
+        if args.runtime_command == "heartbeat":
+            if args.runtime_heartbeat_command == "check":
+                report = check_stale_heartbeats(
+                    workflow_name=args.workflow_name,
+                    stale_after_sec=args.stale_after_sec,
+                    warn_after_sec=args.warn_after_sec,
+                    events_dir=args.events_dir,
+                )
+                _print_json(report.to_dict())
+                if args.fail_on == "never":
+                    return 0
+                if args.fail_on == "warn" and report.status in ("warn", "stale"):
+                    return 1
+                if args.fail_on == "stale" and report.status == "stale":
+                    return 1
+                return 0
+            parser.print_help()
+            return 0
         parser.print_help()
         return 0
 
@@ -1140,9 +1396,10 @@ def _main_impl(argv: list[str] | None = None) -> int:
 
     if args.command == "benchmark":
         if args.benchmark_command == "run":
+            from robot_dh.lake.uri import to_local_path
             report = run_benchmark(
                 suite_path=args.suite,
-                output_dir=args.output,
+                output_dir=to_local_path(args.output),
                 record_to_registry=args.record_to_registry,
                 default_config_path=args.config,
                 gate_policy_path=args.gate_policy,

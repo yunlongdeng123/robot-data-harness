@@ -57,8 +57,42 @@ def is_s3_uri(uri: str) -> bool:
     return uri.startswith("s3://")
 
 
+def is_file_uri(uri: str) -> bool:
+    """是否以 file:// 开头（仅 v1.7 起 local-first 流程做严格区分时使用）。
+
+    与 ``is_local_uri`` 的区别：``is_local_uri`` 把"裸路径 ./foo / /abs/foo"也算
+    local，而 ``is_file_uri`` 只识别显式的 ``file://`` URI；适合需要"显式声明
+    是不是用户主动指本地"的场景。
+    """
+    if not isinstance(uri, str):
+        return False
+    return uri.startswith("file://")
+
+
 def is_local_uri(uri: str) -> bool:
     return not is_s3_uri(uri)
+
+
+def to_local_path(uri: str) -> Path:
+    """把 file:// / 裸本地路径 转成 ``Path``。s3:// 抛 ``ValueError``。"""
+    parsed = parse_uri(uri)
+    if not parsed.is_local:
+        raise ValueError(f"to_local_path() requires a local URI; got {uri}")
+    return Path(parsed.local_path)
+
+
+def to_file_uri(path: str | Path) -> str:
+    """把任意本地路径/Path 规范化成 ``file:///abs/...``，便于跨进程传递。"""
+    p = Path(str(path)).expanduser()
+    try:
+        resolved = p.resolve()
+    except OSError:
+        resolved = p
+    posix = resolved.as_posix()
+    if not posix.startswith("/"):
+        # Windows 等绝对路径不带前导斜杠时补一个，保持 RFC8089 形式。
+        posix = "/" + posix
+    return f"file://{posix}"
 
 
 def _strip_double_slashes(key: str) -> str:

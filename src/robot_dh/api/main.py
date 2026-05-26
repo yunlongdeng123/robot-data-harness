@@ -29,7 +29,7 @@ class ValidateRequest(BaseModel):
     artifact_prefix: str | None = None
 
 
-app = FastAPI(title="robot-data-harness", version="0.1.5")
+app = FastAPI(title="robot-data-harness", version="0.1.7")
 
 
 @app.get("/health")

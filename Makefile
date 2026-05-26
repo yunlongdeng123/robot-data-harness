@@ -37,8 +37,20 @@ DATASETS_BUCKET_REMOTE ?= robot-datasets
         argo-list argo-logs argo-delete-completed k8s-apply-v1-5-secret-example \
         argo-sync-log-archive-secret argo-apply-log-archive \
         argo-verify-log-archive argo-enable-log-archive \
-        exporter-build exporter-test exporter-run exporter-docker-build exporter-kind-load \
-        exporter-k8s-apply exporter-port-forward exporter-logs
+	exporter-build exporter-test exporter-run exporter-docker-build exporter-kind-load \
+        exporter-k8s-apply exporter-port-forward exporter-logs \
+        local-preflight local-init-data local-mc-alias local-plan-devscale \
+        local-sync-devscale local-verify-devscale local-create-kind-dev \
+        local-destroy-kind-dev local-kind-status local-apply-data-pvc \
+        local-data-debug local-devscale-summary local-print-dev-env \
+        local-runtime-doctor local-datasets-list local-datasets-verify \
+        local-adapter-list local-adapter-detect local-adapter-probe \
+        local-qc-devscale local-etl-devscale local-ml-ready-devscale \
+        local-heartbeat-check local-argo-logs-index v1-7-local-smoke \
+        argo-local-apply argo-local-submit argo-local-submit-qc \
+        argo-local-submit-ml-ready argo-local-tail argo-local-status \
+        argo-local-logs argo-local-sync argo-local-debug \
+        argo-local-clean-completed v1-7-local-platform-smoke
 
 setup:
 	$(PIP) install --upgrade pip
@@ -512,3 +524,301 @@ platform-smoke:
 	@docker images robot-data-harness:local --format="  image: {{.Repository}}:{{.Tag}} {{.CreatedSince}}" 2>/dev/null \
 		|| echo "  image: MISSING (run make docker-build)"
 	@echo "  -> 上述条件齐备后：make argo-submit-multisource-scale30"
+
+
+# ---------- v1.7 Local-First Data Runtime（Windows D 盘 + 专用 kind）----------
+# 详见 docs/v1_7_local_data_runtime.md 与 docs/v1_7_windows_d_drive_kind_mount.md。
+#
+# 三层数据策略：
+#   devscale  ≤ 3GB    本地 kind robot-dh-dev，默认入口
+#   scale30   ~25GiB   远端或夜间压测（沿用 v1.6 make argo-submit-multisource-scale30）
+#   full      TB 级     不在本仓库 scope
+#
+# 关键约束：
+#   - 默认 ROBOT_DH_LOCAL_DATA_ROOT=/mnt/d/robot-dh-local，不允许写 C 盘或 WSL VHDX。
+#   - 任何破坏性 target（destroy kind / force clean）必须二次确认，不自动执行。
+#   - 不自动重建 kind cluster，不自动清理 D 盘数据。
+
+V1_7_LOCAL_DATA_ROOT ?= /mnt/d/robot-dh-local
+V1_7_KIND_CLUSTER ?= robot-dh-dev
+V1_7_KIND_CONFIG ?= configs/kind-robot-dh-dev-local.yaml
+V1_7_DEVSCALE_CONFIG ?= configs/devscale_datasets.yaml
+
+.PHONY: local-preflight local-init-data local-mc-alias local-plan-devscale \
+        local-sync-devscale local-verify-devscale local-create-kind-dev \
+        local-destroy-kind-dev local-kind-status local-apply-data-pvc \
+        local-data-debug local-devscale-summary local-print-dev-env \
+        local-runtime-doctor local-datasets-list local-datasets-verify \
+        local-adapter-list local-adapter-detect local-adapter-probe \
+        local-qc-devscale local-etl-devscale local-ml-ready-devscale \
+        local-heartbeat-check local-argo-logs-index v1-7-local-smoke \
+        argo-local-apply argo-local-submit argo-local-submit-qc \
+        argo-local-submit-ml-ready argo-local-tail argo-local-status \
+        argo-local-logs argo-local-sync argo-local-debug \
+        argo-local-clean-completed v1-7-local-platform-smoke
+
+local-preflight:
+	@ROBOT_DH_LOCAL_DATA_ROOT=$(V1_7_LOCAL_DATA_ROOT) \
+		./scripts/local_preflight_d_drive.sh
+
+local-init-data:
+	@ROBOT_DH_LOCAL_DATA_ROOT=$(V1_7_LOCAL_DATA_ROOT) \
+		./scripts/local_init_data_dirs.sh
+
+local-mc-alias:
+	@./scripts/local_mc_alias_remote.sh
+
+local-plan-devscale:
+	@ROBOT_DH_LOCAL_DATA_ROOT=$(V1_7_LOCAL_DATA_ROOT) \
+		./scripts/local_plan_devscale_sync.sh --config $(V1_7_DEVSCALE_CONFIG)
+
+local-sync-devscale:
+	@ROBOT_DH_LOCAL_DATA_ROOT=$(V1_7_LOCAL_DATA_ROOT) \
+		./scripts/local_sync_devscale.sh
+
+local-verify-devscale:
+	@ROBOT_DH_LOCAL_DATA_ROOT=$(V1_7_LOCAL_DATA_ROOT) \
+		./scripts/local_verify_devscale.sh
+
+local-create-kind-dev:
+	@ROBOT_DH_LOCAL_DATA_ROOT=$(V1_7_LOCAL_DATA_ROOT) \
+		./scripts/local_create_kind_with_d_mount.sh \
+			--name $(V1_7_KIND_CLUSTER) \
+			--config $(V1_7_KIND_CONFIG)
+
+# 注意：destroy 需要在 stdin 输入 DELETE_DEV_KIND 二次确认，不自动执行。
+local-destroy-kind-dev:
+	@./scripts/local_destroy_kind_dev.sh --name $(V1_7_KIND_CLUSTER)
+
+local-kind-status:
+	@echo "[local-kind-status] cluster=$(V1_7_KIND_CLUSTER)"
+	@if kind get clusters 2>/dev/null | grep -qx "$(V1_7_KIND_CLUSTER)"; then \
+		echo "  kind cluster: present"; \
+		kubectl --context kind-$(V1_7_KIND_CLUSTER) get nodes -o wide 2>/dev/null || true; \
+		kubectl --context kind-$(V1_7_KIND_CLUSTER) -n $(ROBOT_DH_NS) get pv,pvc,configmap,pod 2>/dev/null | head -n 30 || true; \
+	else \
+		echo "  kind cluster: MISSING (run make local-create-kind-dev)"; \
+	fi
+
+local-apply-data-pvc:
+	kubectl apply -f k8s/v1_7_local/namespace.yaml
+	kubectl apply -f k8s/v1_7_local/local-runtime-configmap.yaml
+	kubectl apply -f k8s/v1_7_local/local-data-pv-pvc.yaml
+	kubectl apply -f k8s/v1_7_local/local-data-debug-pod.yaml
+	@echo ""
+	@echo "v1.7 本地数据 PV/PVC/ConfigMap/debug-pod 已应用。"
+	@echo "进 debug pod 看 raw 数据：make local-data-debug"
+
+local-data-debug:
+	@if ! kubectl -n $(ROBOT_DH_NS) get pod robot-dh-local-debug >/dev/null 2>&1; then \
+		echo "ERROR: robot-dh-local-debug 不存在，请先 make local-apply-data-pvc。" >&2; \
+		exit 1; \
+	fi
+	@kubectl -n $(ROBOT_DH_NS) wait --for=condition=Ready pod/robot-dh-local-debug --timeout=60s
+	@echo "[robot-dh-local-debug] /mnt/local-data/robot-dh-local/raw:"
+	@kubectl -n $(ROBOT_DH_NS) exec robot-dh-local-debug -- ls -lh /mnt/local-data/robot-dh-local/raw
+	@echo ""
+	@echo "[robot-dh-local-debug] /mnt/local-data/robot-dh-local/manifests:"
+	@kubectl -n $(ROBOT_DH_NS) exec robot-dh-local-debug -- ls -lh /mnt/local-data/robot-dh-local/manifests 2>/dev/null || true
+
+local-devscale-summary:
+	@ROBOT_DH_LOCAL_DATA_ROOT=$(V1_7_LOCAL_DATA_ROOT) \
+		./scripts/local_devscale_summary.sh --config $(V1_7_DEVSCALE_CONFIG)
+
+local-print-dev-env:
+	@ROBOT_DH_LOCAL_DATA_ROOT=$(V1_7_LOCAL_DATA_ROOT) \
+		./scripts/local_print_dev_env.sh
+
+# ---------------------------------------------------------------------------
+# v1.7 Platform Runtime (Python CLI 接线；不依赖 mc / kind)
+# ---------------------------------------------------------------------------
+
+V1_7_RUNTIME_CONFIG ?= configs/devscale_runtime.yaml
+V1_7_QC_OUT_DIR ?= $(V1_7_LOCAL_DATA_ROOT)/lake/qc
+V1_7_LAKE_ROOT ?= file://$(V1_7_LOCAL_DATA_ROOT)/lake
+V1_7_ARGO_ARCHIVE_ROOT ?= s3://robot-dh-artifacts/argo-logs
+
+local-runtime-doctor:
+	@ROBOT_DH_LOCAL_DATA_ROOT=$(V1_7_LOCAL_DATA_ROOT) \
+		$(PYTHON) -m robot_dh.cli local runtime doctor \
+		--config $(V1_7_RUNTIME_CONFIG) \
+		--devscale-config $(V1_7_DEVSCALE_CONFIG)
+
+local-datasets-list:
+	@ROBOT_DH_LOCAL_DATA_ROOT=$(V1_7_LOCAL_DATA_ROOT) \
+		$(PYTHON) -m robot_dh.cli local datasets list \
+		--config $(V1_7_RUNTIME_CONFIG) \
+		--devscale-config $(V1_7_DEVSCALE_CONFIG)
+
+local-datasets-verify:
+	@ROBOT_DH_LOCAL_DATA_ROOT=$(V1_7_LOCAL_DATA_ROOT) \
+		$(PYTHON) -m robot_dh.cli local datasets verify \
+		--config $(V1_7_RUNTIME_CONFIG) \
+		--devscale-config $(V1_7_DEVSCALE_CONFIG)
+
+local-adapter-list:
+	@$(PYTHON) -m robot_dh.cli adapter list
+
+# 用法：make local-adapter-detect DATASET_URI=file:///mnt/d/... DATASET_ID=droid_lerobot_dev1g
+local-adapter-detect:
+	@$(PYTHON) -m robot_dh.cli adapter detect \
+		--dataset-uri "$(DATASET_URI)" $(if $(DATASET_ID),--dataset-id $(DATASET_ID),)
+
+local-adapter-probe:
+	@$(PYTHON) -m robot_dh.cli adapter probe \
+		--dataset-uri "$(DATASET_URI)" $(if $(DATASET_ID),--dataset-id $(DATASET_ID),) \
+		$(if $(FAMILY),--family $(FAMILY),)
+
+# 用法：make local-qc-devscale DATASET_ID=droid_lerobot_dev1g
+local-qc-devscale:
+	@ROBOT_DH_LOCAL_DATA_ROOT=$(V1_7_LOCAL_DATA_ROOT) \
+		$(PYTHON) -m robot_dh.cli qc contract run \
+		--dataset-uri file://$(V1_7_LOCAL_DATA_ROOT)/raw/$(DATASET_ID)/v1 \
+		--dataset-family $(or $(FAMILY),droid) \
+		--out $(V1_7_QC_OUT_DIR)/$(DATASET_ID)/contract_report.json
+
+local-etl-devscale:
+	@ROBOT_DH_LOCAL_DATA_ROOT=$(V1_7_LOCAL_DATA_ROOT) \
+		$(PYTHON) -m robot_dh.cli etl run \
+		--dataset-id $(DATASET_ID) --version v1 \
+		--dataset-uri file://$(V1_7_LOCAL_DATA_ROOT)/raw/$(DATASET_ID)/v1 \
+		--lake-root $(V1_7_LAKE_ROOT)
+
+local-ml-ready-devscale:
+	@ROBOT_DH_LOCAL_DATA_ROOT=$(V1_7_LOCAL_DATA_ROOT) \
+		$(PYTHON) -m robot_dh.cli ml-ready export \
+		--dataset-id $(DATASET_ID) --version v1 \
+		--lake-root $(V1_7_LAKE_ROOT) \
+		--out $(V1_7_LOCAL_DATA_ROOT)/lake/ml-ready/$(DATASET_ID)
+
+local-heartbeat-check:
+	@$(PYTHON) -m robot_dh.cli runtime heartbeat check \
+		$(if $(WORKFLOW),--workflow-name $(WORKFLOW),) \
+		--warn-after-sec $(or $(WARN_SEC),120) \
+		--stale-after-sec $(or $(STALE_SEC),300) \
+		--fail-on $(or $(FAIL_ON),stale)
+
+local-argo-logs-index:
+	@$(PYTHON) -m robot_dh.cli argo logs index \
+		--workflow-name $(WORKFLOW) \
+		--namespace $(or $(NS),robot-dh) \
+		--archive-root $(V1_7_ARGO_ARCHIVE_ROOT) \
+		$(if $(DRY_RUN),--dry-run,)
+
+# 一键 dry-run：runtime doctor + datasets list + adapter list + heartbeat check（无远端依赖）
+v1-7-local-smoke:
+	@echo "== v1.7 platform smoke =="
+	@$(PYTHON) -m robot_dh.cli adapter list >/dev/null && echo "[ok] adapter list"
+	@$(PYTHON) -m robot_dh.cli runtime heartbeat check \
+		--events-dir /tmp/robot-dh-smoke-events \
+		--warn-after-sec 60 --stale-after-sec 300 --fail-on never \
+		>/dev/null && echo "[ok] heartbeat check (no events)"
+	@$(PYTHON) -m robot_dh.cli local datasets list \
+		--config $(V1_7_RUNTIME_CONFIG) \
+		--devscale-config $(V1_7_DEVSCALE_CONFIG) \
+		>/dev/null && echo "[ok] devscale datasets list"
+	@echo "== smoke passed =="
+
+# ---------------------------------------------------------------------------
+# v1.7 Argo Local WorkflowTemplate（仅在 kind-robot-dh-dev context 下提交）
+# ---------------------------------------------------------------------------
+
+V1_7_ARGO_DIR ?= argo/v1_7_local
+V1_7_ARGO_NS ?= robot-dh
+
+argo-local-apply:
+	@echo "== apply v1.7 Local Argo RBAC / ConfigMap / WorkflowTemplate / CronWorkflow =="
+	@# v1.7 local-argo-rbac.yaml 只挂额外 Role/RoleBinding，复用 v1.5 的 ServiceAccount + 基础 Role；
+	@# 新建 kind 集群时必须先 apply v1.5 这三件套，否则 step pod 在 admission 阶段被拒（SA not found）。
+	kubectl apply -f k8s/v1_5_argo/serviceaccount.yaml
+	kubectl apply -f k8s/v1_5_argo/role.yaml
+	kubectl apply -f k8s/v1_5_argo/rolebinding.yaml
+	kubectl apply -f k8s/v1_7_local/local-argo-rbac.yaml
+	kubectl apply -f k8s/v1_7_local/local-argo-configmap.yaml
+	kubectl apply -f k8s/v1_7_local/local-runtime-configmap.yaml
+	kubectl apply -f $(V1_7_ARGO_DIR)/templates/
+	kubectl apply -f $(V1_7_ARGO_DIR)/cron/local-devscale-cronworkflow.yaml
+	@echo "[ok] v1.7 Argo Local resources applied. 提交：make argo-local-submit"
+
+argo-local-submit:
+	@./$(V1_7_ARGO_DIR)/scripts/submit_local_devscale.sh
+
+argo-local-submit-qc:
+	@kubectl -n $(V1_7_ARGO_NS) create -f $(V1_7_ARGO_DIR)/workflows/submit-local-qc.yaml
+
+argo-local-submit-ml-ready:
+	@kubectl -n $(V1_7_ARGO_NS) create -f $(V1_7_ARGO_DIR)/workflows/submit-local-ml-ready.yaml
+
+# 用法：make argo-local-tail [WF=robot-dh-local-devscale-xxxxx]
+argo-local-tail:
+	@WF="$${WF:-$$(kubectl -n $(V1_7_ARGO_NS) get wf -l role=devscale-main -o jsonpath='{.items[-1:].metadata.name}')}"; \
+		if [ -z "$$WF" ]; then echo "no devscale workflow found, run: make argo-local-submit" >&2; exit 1; fi; \
+		echo "tailing $$WF"; \
+		./$(V1_7_ARGO_DIR)/scripts/tail_live_workflow_logs.sh "$$WF" --ns $(V1_7_ARGO_NS)
+
+argo-local-status:
+	@kubectl -n $(V1_7_ARGO_NS) get wf -l role=devscale-main -o wide || true
+	@echo ""
+	@kubectl -n $(V1_7_ARGO_NS) get wf -l role=devscale-qc -o wide 2>/dev/null || true
+	@kubectl -n $(V1_7_ARGO_NS) get wf -l role=devscale-ml-ready -o wide 2>/dev/null || true
+	@kubectl -n $(V1_7_ARGO_NS) get cronworkflow.argoproj.io -l role=devscale-main-cron 2>/dev/null || true
+
+argo-local-logs:
+	@WF="$${WF:-$$(kubectl -n $(V1_7_ARGO_NS) get wf -l role=devscale-main -o jsonpath='{.items[-1:].metadata.name}')}"; \
+		if [ -z "$$WF" ]; then echo "no devscale workflow found" >&2; exit 1; fi; \
+		echo "==== last devscale workflow: $$WF ===="; \
+		kubectl -n $(V1_7_ARGO_NS) logs -l workflows.argoproj.io/workflow=$$WF -c main --tail=500 --prefix --max-log-requests=20
+
+# argo sync + archive logs index 写回 PG（dry-run 可用）
+# 用法：make argo-local-sync [WF=...] [DRY_RUN=1]
+argo-local-sync:
+	@WF="$${WF:-$$(kubectl -n $(V1_7_ARGO_NS) get wf -l role=devscale-main -o jsonpath='{.items[-1:].metadata.name}')}"; \
+		if [ -z "$$WF" ]; then echo "no devscale workflow found" >&2; exit 1; fi; \
+		args=""; [ -n "$$DRY_RUN" ] && args="--dry-run"; \
+		./$(V1_7_ARGO_DIR)/scripts/sync_workflow_steps.sh "$$WF" --ns $(V1_7_ARGO_NS) $$args
+
+argo-local-debug:
+	@kubectl -n $(V1_7_ARGO_NS) apply -f k8s/v1_7_local/local-data-debug-pod.yaml
+	@kubectl -n $(V1_7_ARGO_NS) wait --for=condition=Ready pod/robot-dh-local-debug --timeout=60s
+	@echo "[robot-dh-local-debug] /mnt/local-data/robot-dh-local/raw:"
+	@kubectl -n $(V1_7_ARGO_NS) exec robot-dh-local-debug -- ls -lh /mnt/local-data/robot-dh-local/raw
+
+# 清理 7 天前已完成（Succeeded/Failed/Error）的 devscale workflow
+argo-local-clean-completed:
+	@kubectl -n $(V1_7_ARGO_NS) get wf -l component=v1-7-local \
+		-o jsonpath='{range .items[?(@.status.phase=="Succeeded")]}{.metadata.name}{"\n"}{end}{range .items[?(@.status.phase=="Failed")]}{.metadata.name}{"\n"}{end}{range .items[?(@.status.phase=="Error")]}{.metadata.name}{"\n"}{end}' \
+		| while read wf; do [ -n "$$wf" ] && kubectl -n $(V1_7_ARGO_NS) delete wf "$$wf"; done; true
+
+# v1.7 Local Platform smoke：本地 doctor + verify + image + kind context + pvc + template，
+# **不**真的提交 workflow，给用户提示下一步命令。
+v1-7-local-platform-smoke:
+	@echo "== v1.7 local PLATFORM smoke =="
+	@echo "[1/6] robot-dh local runtime doctor (no allow-over-limit)"
+	@$(PYTHON) -m robot_dh.cli local runtime doctor \
+		--config $(V1_7_RUNTIME_CONFIG) \
+		--devscale-config $(V1_7_DEVSCALE_CONFIG) \
+		--allow-over-limit >/dev/null && echo "    [ok] runtime doctor" || echo "    [warn] runtime doctor reports issues; 见上面 JSON"
+	@echo "[2/6] robot-dh local datasets list"
+	@$(PYTHON) -m robot_dh.cli local datasets list \
+		--config $(V1_7_RUNTIME_CONFIG) \
+		--devscale-config $(V1_7_DEVSCALE_CONFIG) \
+		>/dev/null && echo "    [ok] devscale datasets list"
+	@echo "[3/6] docker image robot-data-harness:local"
+	@if docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -q '^robot-data-harness:local$$'; then \
+		echo "    [ok] image present"; \
+	else echo "    [warn] robot-data-harness:local 不存在，先 make docker-build && make kind-load"; fi
+	@echo "[4/6] kubectl context"
+	@ctx=$$(kubectl config current-context 2>/dev/null || echo ""); \
+		echo "    current=$$ctx (期望 kind-robot-dh-dev)"; \
+		if [ "$$ctx" = "kind-robot-dh-dev" ]; then echo "    [ok]"; else echo "    [warn] 不是 kind-robot-dh-dev，提交前请：kubectl config use-context kind-robot-dh-dev"; fi
+	@echo "[5/6] PVC robot-dh-local-data-pvc"
+	@if kubectl -n $(V1_7_ARGO_NS) get pvc robot-dh-local-data-pvc >/dev/null 2>&1; then \
+		echo "    [ok] PVC exists"; \
+	else echo "    [warn] PVC 不存在，先 make local-apply-data-pvc"; fi
+	@echo "[6/6] WorkflowTemplate robot-dh-local-devscale"
+	@if kubectl -n $(V1_7_ARGO_NS) get workflowtemplate robot-dh-local-devscale >/dev/null 2>&1; then \
+		echo "    [ok] WorkflowTemplate exists"; \
+	else echo "    [warn] 模板不存在，先 make argo-local-apply"; fi
+	@echo ""
+	@echo "== v1.7 local PLATFORM smoke completed =="
+	@echo "下一步：make argo-local-submit  # 然后 make argo-local-tail 看实时日志"

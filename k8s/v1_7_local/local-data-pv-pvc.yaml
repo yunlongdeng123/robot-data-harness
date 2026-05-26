@@ -1,0 +1,59 @@
+# v1.7 Local-First Data Runtime - PersistentVolume + PVC
+#
+# 仅适用于 kind cluster `robot-dh-dev`，与 configs/kind-robot-dh-dev-local.yaml
+# 的 extraMounts.containerPath 必须保持完全一致。
+#
+# 路径映射回顾：
+#   WSL / Windows : D:\robot-dh-local        == /mnt/d/robot-dh-local
+#   kind node     : /mnt/local-data/robot-dh-local
+#   Pod           : /mnt/local-data/robot-dh-local
+#
+# 注意：
+#   1. hostPath PV 是 kind node 内部路径，**不是** WSL host path。
+#   2. ReadWriteOnce + single-node：kind dev 只有一个 control-plane 节点，
+#      够用；多节点 K8s 需要换 NFS / CSI driver。
+#   3. 不要把该 PV apply 到云端 K8s。
+
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: robot-dh-local-data-pv
+  labels:
+    app: robot-dh
+    component: local-data-runtime
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: robot-dh-local
+  hostPath:
+    path: /mnt/local-data/robot-dh-local
+    type: Directory
+  # 限定只能挂到 robot-dh-dev cluster 的 control-plane 节点上，避免误用。
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - robot-dh-dev-control-plane
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: robot-dh-local-data-pvc
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: local-data-runtime
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: robot-dh-local
+  resources:
+    requests:
+      storage: 100Gi
+  volumeName: robot-dh-local-data-pv

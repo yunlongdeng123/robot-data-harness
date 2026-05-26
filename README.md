@@ -1,4 +1,4 @@
-## robot-data-harness v1.6
+## robot-data-harness v1.7
 
 `robot-data-harness` 是一个面向机械臂末端位姿 `eexyzxyzw` 数据集的 Kubernetes-native 数据质量与评测 Harness。它覆盖数据集注册、轨迹校验、质量门禁、报告生成、运行历史沉淀，以及在 WSL / kind / Kubernetes Job 中对远端 PostgreSQL、MinIO、Redis 的统一接入。
 
@@ -11,27 +11,40 @@
 - **robot-dh-exporter 平台层 metrics**（v1.6.5）：保留所有 v1.5 指标，新增 14 个指标覆盖 `qc_contracts` / `qc_contract_runs` / `workflow_runs` / `workflow_steps` / `asset_profiles` / `ml_ready_datasets` / `dataset_partitions` / `task_heartbeats` / `openlineage_events`，`/healthz` 返回 `db_connected` / `last_scrape_time` / `last_scrape_error`
 - **多源 scale30 实跑回归修复**（v1.6.6 ~ v1.6.8）：基于 `robot-dh-multisource-scale30-{fhkvr,qptk9,ddbfb,fvx5z,dls4z}` 五次实跑的 9 类失败，沉淀为 QC probe 容错链（`__cause__` / `__context__` / `traceback` 三段 fallback、fast vs default boto3 client 分档）、droid lerobot v2 / bridgedata_v2 专属 adapter、normalize resume input cache、`S3LakeStore.download_dir` 进度心跳（每 N 文件 + 每 N 秒双触发）、Argo `archiveLogs` + `podGC=OnWorkflowCompletion` 闭环、`etl-phase` / `qc-contract-run` ephemeral-storage + `python -u | tee` 模板
 
-完全向后兼容 v1.5 Argo `robot-dh-scale-etl` / v1.4 数据湖 / v1.3 validate / scan / gate / registry / S3 artifact 行为。
+**v1.7 在 v1.6 基础上落地 Local-First Robot Data Platform Runtime**：把"默认 30 GiB 跨公网 scale30"切换为"默认 ≤ 3 GiB devscale + 本地 file URI + 本地 kind Argo DAG"，远端 scale30 仅作为手动压测路径保留。
 
-当前仓库的运行口径有五条主线：
+- **本地数据运行时**（`v1.7 Local-First Data Runtime`）：Windows D 盘 `D:\robot-dh-local` 一次性同步 droid_lerobot_dev1g / robomimic_dev1g / bridgedata_v2_dev 三套 devscale 数据；kind `extraMounts` 把 D 盘挂到 `/mnt/local-data/robot-dh-local`；新增 `scripts/local_*.sh` 一条龙（preflight / init / plan / sync / verify / create-kind / apply-data-pvc）与 `k8s/v1_7_local/{namespace,local-data-pv-pvc,local-runtime-configmap,local-data-debug-pod}.yaml`
+- **本地 file URI 一等公民**：`robot_dh.lake.uri` 新增 `is_file_uri / to_file_uri / to_local_path`；`etl/normalize.py::_materialize_input` 命中 `is_local_uri` 直接返回源 `Path`，不再复制到 `/tmp/robot-dh/input-cache`，并打 `materialize_input: using local direct input, no download` 日志；`qc/profile.py::_probe_hdf5_uri/_probe_video_uri` 对本地 URI 不 unlink 源文件（强守门测试 `tests/test_qc_probe_failure_surface.py::test_probe_*_uri_does_not_delete_local_source`）
+- **RobotDatasetAdapter 注册表**（`src/robot_dh/adapters/`）：`DroidLeRobotAdapter / RobomimicAdapter / BridgeDataAdapter / UniversalAdapter` 按 layout markers + dataset_id 前缀打分，confidence 最高者命中；`configs/dataset_adapters.yaml` 仅放参数 override；新增 CLI `robot-dh adapter list / detect / probe`
+- **本地运行时 doctor / verify**：`robot-dh local runtime doctor` 一次性检查 D 盘目录、devscale `_manifest.json`、总大小 ≤ 3 GiB 限额；`robot-dh local datasets list / verify` 把 `devscale_plan.json` 与本地实文件做大小比对
+- **容灾参数下沉**：`qc contract run` 新增 `--max-workers / --file-timeout-sec / --probe-timeout-sec / --max-retries / --disable-remote-lazy / --fail-fast`，映射到 `ROBOT_DH_QC_*` 环境变量，由 `parquet_probe.py` / `hdf5_probe.py` 消费；bridge 远端超时统一标 `cause_type=REMOTE_PARQUET_TIMEOUT`
+- **运行时哨兵**：`robot-dh runtime heartbeat check` 扫 `runs/events/heartbeats_*.jsonl`（或 PG `task_heartbeats`），按 `(workflow, phase, step)` 取最新一拍，超过 `--stale-after-sec` 直接退 1
+- **archive log 索引**：`robot-dh argo logs index --workflow-name ...` 从 `kubectl get workflow -o json`（或 `--from-json`）派生每个 step pod 的 `s3://robot-dh-artifacts/argo-logs/.../main.log` URI，写回 `workflow_steps.metrics` JSON 字段（PG schema 没列就降级 warning，不抛）
+- **Argo Local DAG**（`argo/v1_7_local/`）：`robot-dh-local-devscale` WorkflowTemplate（20 节点：1 doctor + 1 verify + 3 probe + 3 qc + 3 normalize + 3 features + 1 ads + 1 ml-ready + 1 benchmark + 1 lineage + 1 argo-sync + 1 logs-index）+ `robot-dh-local-qc / robot-dh-local-ml-ready` 两个分支模板 + `local-devscale-cronworkflow` + `tail_live_workflow_logs.sh` 真·全程 follow
+- **Dockerfile 内嵌 `kubectl v1.30.4`**：v1.7 local Argo workflow 的 `argo-sync / archive-logs-index` step 在 pod 内调用 `kubectl get workflow -o json` 写回 PG
+
+完全向后兼容 v1.6 多源 scale30 / v1.5 Argo `robot-dh-scale-etl` / v1.4 数据湖 / v1.3 validate / scan / gate / registry / S3 artifact 行为。
+
+当前仓库的运行口径有六条主线：
 
 - 默认兼容模式：本地 SQLite + 本地 artifact + kind PVC demo（与 v1.3 完全一致）
 - 远端直连模式：公网白名单直连 PostgreSQL / MinIO / Redis（推荐生产路径）
 - v1.4 数据湖 ETL：`normalize → build-features → build-ads` 三段流水，落 `lake_assets` / `etl_jobs` / `lineage_edges` / `dataset_versions` / `quality_snapshots`
 - v1.5 Argo 编排：Sharded ETL / Benchmark / build-ADS 由 Argo Workflows 调度；写入 `etl_perf_runs` / `etl_shards` / `benchmark_runs` / `benchmark_cases` / `runtime_events`
 - **v1.6 平台层**：多源 QC contract + 可恢复 normalize + ML-ready export 由 `robot-dh-multisource-scale30` DAG 编排；写入 `qc_contracts` / `qc_contract_runs` / `workflow_runs` / `workflow_steps` / `asset_profiles` / `ml_ready_datasets` / `dataset_partitions` / `task_heartbeats` / `openlineage_events`
+- **v1.7 本地运行时**：devscale ≤ 3 GiB + 本地 file URI + adapter 注册表 + Argo Local DAG（`robot-dh-local-devscale` 20 节点）；默认入口从 scale30 切换到 devscale，scale30 仅手动压测
 
 本仓库已经完成并验证以下链路：
 
-- 本地 `make test`（v1.3 完整 + v1.4 lake + v1.5 sharded ETL / benchmark / profiler / runtime events + v1.6 heartbeat / checkpoint / partition / QC contract / ML-ready / argo sync / lineage report / API 只读端点；无远端服务时可选测试跳过）
+- 本地 `make test`（v1.3 完整 + v1.4 lake + v1.5 sharded ETL / benchmark / profiler / runtime events + v1.6 heartbeat / checkpoint / partition / QC contract / ML-ready / argo sync / lineage report / API 只读端点 + **v1.7 local runtime / adapters / file URI / heartbeat stale / argo logs index / Local WorkflowTemplate YAML 守门**；无远端服务时可选测试跳过）
 - WSL 公网白名单直连：`infra doctor`（含 lake）、`lake audit`、`lake list`、`etl run --phase ...`、`etl scan`、`etl plan / run-shard / merge-summary`、`benchmark run / report`、`qc contract run`、`ml-ready export`
 - kind / K8s remote Secret 模式下的 validator job、scan job、API `/health`、`/infra/health`、`/qc/*`、`/ml-ready/*`、`/workflows/*`
-- kind 上的 Argo Workflows：v1.5 `robot-dh-scale-etl` / `robot-dh-benchmark` / `robot-dh-build-ads` + **v1.6 `robot-dh-multisource-scale30` / `robot-dh-contract-qc` / `robot-dh-ml-ready-export` + `robot-dh-multisource-scale30-cron`**
+- kind 上的 Argo Workflows：v1.5 `robot-dh-scale-etl` / `robot-dh-benchmark` / `robot-dh-build-ads` + **v1.6 `robot-dh-multisource-scale30` / `robot-dh-contract-qc` / `robot-dh-ml-ready-export` + `robot-dh-multisource-scale30-cron`** + **v1.7 `robot-dh-local-devscale` / `robot-dh-local-qc` / `robot-dh-local-ml-ready` + `robot-dh-local-devscale-nightly` CronWorkflow（本地 kind `robot-dh-dev` 已实跑 `Succeeded`）**
 - 独立 Go exporter `robot-dh-exporter`（`/metrics` + 增强 `/healthz` 含 `db_connected`/`last_scrape_time`/`last_scrape_error`）
 
-包版本当前为 `0.1.6`。
+包版本当前为 `0.1.7`。
 
-> 端到端可跑命令清单：见末尾 [v1.6 端到端命令清单](#v16-端到端命令清单)。
+> 端到端可跑命令清单：见末尾 [v1.7 端到端命令清单（recommended）](#v17-端到端命令清单recommended)（默认）和 [v1.6 端到端命令清单（远端 scale30）](#v16-端到端命令清单远端-scale30)（手动压测）。
 
 ## 目录
 
@@ -61,7 +74,10 @@
 - [v1.6.4 — Argo multi-source DAG + workflow metadata sync](#v164--argo-multi-source-dag--workflow-metadata-sync)
 - [v1.6.5 — robot-dh-exporter 平台层 metrics](#v165--robot-dh-exporter-v16-metrics)
 - [v1.6.6 ~ v1.6.8 — 多源 scale30 实跑回归修复](#v166--v168--多源-scale30-实跑回归修复)
-- [v1.6 端到端命令清单](#v16-端到端命令清单)
+- [v1.7 端到端命令清单（recommended）](#v17-端到端命令清单recommended)
+- [v1.6 端到端命令清单（远端 scale30）](#v16-端到端命令清单远端-scale30)
+- [v1.7 — Local-First Data Runtime（Windows D 盘 + 专用 kind）](#v17--local-first-data-runtimewindows-d-盘--专用-kind)
+- [v1.7 — Local-First Robot Data Platform Runtime（adapter / 本地 file URI / 容灾）](#v17--local-first-robot-data-platform-runtimeadapter--本地-file-uri--容灾)
 
 ## 核心能力
 
@@ -655,7 +671,7 @@ robot-dh infra doctor --check db,s3,redis
 
 ## API 参考
 
-当前 FastAPI 服务位于 `robot_dh.api.main:app`，版本号为 `0.1.5`。
+当前 FastAPI 服务位于 `robot_dh.api.main:app`，版本号为 `0.1.7`。
 
 ### 接口列表
 
@@ -1682,92 +1698,58 @@ v1.6.1 ~ v1.6.5 上线后，在 kind 集群跑了 5 轮 `robot-dh-multisource-sc
 - **kubectl logs `-f -l ...` 不会自动接入后续新建 step pod**：DAG fanout 后期新拉起的 pod 需要 rerun `make argo-platform-tail`。这是 kubectl 行为，不要再用 argo CLI 绕过；如需「真·全程 follow」走 `make argo-sync-latest` 把状态写 PG 后再查。
 
 
-## v1.6 端到端命令清单
+## v1.7 端到端命令清单（recommended）
 
-以下命令是 v1.6 整个数据平台的端到端跑通脚本，按"本地 → 远端 WSL 直连 → kind / K8s Argo"三段递进，每段都可以独立验收。**所有命令都已在本仓库验证可跑（pytest 244 passed / 14 skipped / Go exporter test 全过）**。
+以下命令是 v1.7 整个 Local-First 数据平台的端到端跑通脚本，按"本地零依赖 → D 盘 devscale 镜像 → kind / K8s Argo Local DAG"三段递进，每段都可以独立验收。**所有命令都已在本仓库验证可跑（pytest 312 passed / 14 skipped；本地 kind `robot-dh-dev` Argo Local DAG `robot-dh-local-devscale` 已实跑 `Succeeded`）**。
 
-> **依赖前提**（仅一次）：`make setup` 完成；Python 3.10+；可选 docker / kind / kubectl / Argo。
+> v1.6 的远端 scale30 命令保留在 [v1.6 端到端命令清单（远端 scale30）](#v16-端到端命令清单远端-scale30) 一节，用于手动压测，不作为默认。
 
-### A. 本地零依赖快速验收（5 分钟）
+> **依赖前提**（仅一次）：`make setup` 完成；Python 3.10+；docker / kind / kubectl / Argo
+> 已在本机就绪；Windows D 盘已挂为 `/mnt/d`（WSL2 自动）；Docker Desktop 已把 D 盘加入
+> Resources → File Sharing（默认开启）。
 
-无需远端 PG / MinIO / Redis；用 SQLite + 本地文件系统验证 v1.6 全部新模块。
+### A. 本地零依赖快速验收（5 分钟，纯 Python）
+
+无需远端 PG / MinIO / Redis，也无需 kind；用 SQLite + 本地文件系统验证 v1.6 + v1.7 全部新模块。
 
 ```bash
 # A1. 安装依赖（一次性）
 make setup
 
-# A2. 跑全量单元测试：v1.3~v1.6 模块 + Go exporter
+# A2. 全量单元测试：v1.3~v1.7 模块 + Go exporter
 make test
 ( cd go/robot-dh-exporter && GOPROXY=https://goproxy.cn,direct go test ./... )
 
-# A3. 生成 demo 数据
+# A3. v1.7 平台层 smoke（adapter list + datasets list + heartbeat check，无远端）
+make v1-7-local-smoke
+
+# A4. 生成 demo + 本地 normalize + features + ads + qc + ml-ready（v1.6 兼容路径）
 make demo-data
-# 等价：robot-dh generate-demo --output samples/button_press_001 --duration-sec 46 --fps 30
-
-# A4. 本地 normalize（v1.6 heartbeat + checkpoint + resume；可中断后再跑）
-robot-dh normalize \
-  --dataset samples/button_press_001 \
-  --output runs/lake/ods/button_press_001/v1 \
-  --dataset-id button_press_001 \
-  --version v1 \
-  --heartbeat-interval-sec 5 \
-  --progress-log-interval-sec 5
-
-# A5. 复跑：已 manifest → SKIP；只有部分输出 → RESUMED
-robot-dh normalize \
-  --dataset samples/button_press_001 \
-  --output runs/lake/ods/button_press_001/v1 \
-  --dataset-id button_press_001 --version v1 \
-  --resume
-
-# A6. phase-level run（normalize → features → ads）
-robot-dh etl run \
-  --dataset samples/button_press_001 \
-  --dataset-id button_press_001 --version v1 \
-  --lake-root runs/lake \
-  --phase normalize --resume
-robot-dh etl run \
-  --dataset samples/button_press_001 \
-  --dataset-id button_press_001 --version v1 \
-  --lake-root runs/lake \
-  --phase features --resume
-robot-dh etl run \
-  --dataset samples/button_press_001 \
-  --dataset-id button_press_001 --version v1 \
-  --lake-root runs/lake \
-  --phase ads --resume
-
-# A7. v1.6.2 QC contract（universal 适配 demo）
-robot-dh qc contract list
-robot-dh qc profile \
-  --dataset-uri samples/button_press_001 \
-  --dataset-family universal \
-  --output runs/qc/button_press_001/v1
-robot-dh qc contract run \
-  --dataset-family universal \
+robot-dh etl run --dataset samples/button_press_001 --dataset-id button_press_001 --version v1 \
+  --lake-root runs/lake --phase normalize --resume
+robot-dh etl run --dataset samples/button_press_001 --dataset-id button_press_001 --version v1 \
+  --lake-root runs/lake --phase features --resume
+robot-dh etl run --dataset samples/button_press_001 --dataset-id button_press_001 --version v1 \
+  --lake-root runs/lake --phase ads --resume
+robot-dh qc contract run --dataset-family universal \
   --dataset-uri samples/button_press_001 \
   --dataset-id button_press_001 --version v1 \
   --output runs/qc/button_press_001/v1 \
-  --contract configs/qc/universal.yaml \
-  --log-format json
-
-# A8. v1.6.3 ML-ready export（本地 dwd + ads → train/val/test）
+  --contract configs/qc/universal.yaml --log-format json
 robot-dh ml-ready export \
-  --input-root runs/lake/dwd \
-  --quality-root runs/lake/ads/quality \
-  --qc-root runs/qc \
+  --input-root runs/lake/dwd --quality-root runs/lake/ads/quality --qc-root runs/qc \
   --output runs/lake/ml-ready/button_press_demo/v1 \
   --dataset-id button_press_demo --version v1 \
-  --quality-threshold 0 \
-  --split 0.8,0.1,0.1
+  --quality-threshold 0 --split 0.8,0.1,0.1
 
-# A9. v1.6.4 lineage report（无 K8s 仍能跑：用 SQLite 空 DB 出空 report）
-robot-dh lineage report \
-  --workflow-name local-smoke \
-  --namespace robot-dh \
-  --output runs/lake/lineage/reports/local-smoke.json
+# A5. v1.7 平台层验收（adapter detect / probe / heartbeat / argo logs index dry-run）
+robot-dh adapter list
+robot-dh adapter detect --dataset-uri samples/button_press_001 --dataset-id button_press_001
+robot-dh adapter probe  --dataset-uri samples/button_press_001 --family universal
+robot-dh runtime heartbeat check --events-dir runs/events --warn-after-sec 60 \
+  --stale-after-sec 300 --fail-on never
 
-# A10. FastAPI（v1.6 新增 /qc/* /assets/profiles /ml-ready /workflows）
+# A6. FastAPI 控制面（v1.6 已有的接口）
 uvicorn robot_dh.api.main:app --host 0.0.0.0 --port 8000 &
 curl -s http://127.0.0.1:8000/health
 curl -s http://127.0.0.1:8000/qc/contracts
@@ -1775,159 +1757,398 @@ curl -s http://127.0.0.1:8000/ml-ready
 kill %1
 ```
 
-预期：每条命令都返回 0，A2 看到 `244 passed, 14 skipped`，A4/A5 产物在 `runs/lake/ods/...`，A8 在 `runs/lake/ml-ready/...` 看到 `train.parquet / val.parquet / test.parquet / dataset_card.json / dataset_card.md / lineage.json / _manifest.json`。
+预期：A2 看到 `312 passed, 14 skipped`，A3 三行 `[ok]`，A4 各 step 都返回 0 并写出 `runs/lake/ml-ready/.../{train,val,test}.parquet`。
 
 ---
 
-### B. WSL 公网直连（与云端 PG / MinIO / Redis 联调）
+### B. D 盘 devscale 镜像（一次性 ≤ 5 分钟，不读 C 盘）
 
-前提：远端 PG（含 v1.5 + v1.6 schema）/ MinIO（含 `robot-datasets` / `robot-lake`）/ Redis 已就绪，白名单已放行 WSL host。
+把远端 30 GiB scale30 的精简镜像（droid 1.2 GiB + robomimic 0.9 GiB + bridge 0.4 GiB ≤ 3 GiB）同步到 Windows D 盘 `D:\robot-dh-local`。前提：`client/robot-dh-platform.env` 已配（仅这一步要远端 MinIO 凭据，后续 Argo Local DAG 完全不用）。
 
 ```bash
-# B1. 加载平台 env（chmod 600，禁止入 git）
-ls -l client/robot-dh-platform.env   # 期望 -rw------- 600
+# B1. 加载远端 MinIO 凭据；不进 git
 set -a; source client/robot-dh-platform.env; set +a
 
-# B2. 健康检查（含 lake）
-robot-dh infra doctor --check db,s3,redis,lake
+# B2. D 盘 + 工具链体检（df / docker / kind / kubectl / mc / jq / yq；非 /mnt/d 自动拒绝）
+make local-preflight
 
-# B3. 多源 QC contract（DROID / robomimic / Bridge）
-robot-dh qc contract run \
-  --dataset-family droid \
-  --dataset-uri  s3://robot-datasets/raw/droid_lerobot_scale30/v1 \
-  --dataset-id   droid_lerobot_scale30 --version v1 \
-  --output       s3://robot-lake/qc/droid_lerobot_scale30/v1 \
-  --contract     configs/qc/droid_contract.yaml \
-  --log-format json
+# B3. 创建本地目录骨架（raw/ lake/ cache/ manifests/ logs/）；幂等
+make local-init-data
 
-robot-dh qc contract run \
-  --dataset-family robomimic \
-  --dataset-uri  s3://robot-datasets/raw/robomimic_scale30/v1 \
-  --dataset-id   robomimic_scale30 --version v1 \
-  --output       s3://robot-lake/qc/robomimic_scale30/v1 \
-  --contract     configs/qc/robomimic_contract.yaml \
-  --log-format json
+# B4. mc alias 到远端 robotdh-remote（不打印 secret，只测 bucket list）
+make local-mc-alias
 
-robot-dh qc contract run \
-  --dataset-family bridge \
-  --dataset-uri  s3://robot-datasets/raw/bridgedata_v2_scale30/v1 \
-  --dataset-id   bridgedata_v2_scale30 --version v1 \
-  --output       s3://robot-lake/qc/bridgedata_v2_scale30/v1 \
-  --contract     configs/qc/bridge_contract.yaml \
-  --log-format json
+# B5. 生成下载 plan（manifests/devscale_plan.json + .md），总量 > 3 GiB 直接退 1
+make local-plan-devscale
 
-# B4. partition plan（避免 30GB+ 单分片 normalize 超时）
-robot-dh partition plan \
-  --dataset s3://robot-datasets/raw/droid_lerobot_scale30/v1 \
-  --dataset-id droid_lerobot_scale30 --version v1 \
-  --output  s3://robot-lake/tmp/partitions/droid_lerobot_scale30_v1.json \
-  --target-partition-size-gb 2
+# B6. 4 路并发下载 + 3 次重试；已存在且大小一致的文件 SKIP
+make local-sync-devscale
 
-# B5. phase-level normalize（resume + heartbeat）
-robot-dh etl run \
-  --dataset    s3://robot-datasets/raw/droid_lerobot_scale30/v1 \
-  --dataset-id droid_lerobot_scale30 --version v1 \
-  --lake-root  s3://robot-lake \
-  --phase normalize --resume \
-  --heartbeat-interval-sec 30 \
-  --log-format json
+# B7. 校验：文件全量 / 大小对得上 / _manifest.json 落了
+make local-verify-devscale
 
-# B6. ML-ready export（全量三源）
-robot-dh ml-ready export \
-  --input-root   s3://robot-lake/dwd \
-  --quality-root s3://robot-lake/ads/quality \
-  --qc-root      s3://robot-lake/qc \
-  --output       s3://robot-lake/ml-ready/scale30/v1 \
-  --dataset-id scale30 --version v1 \
-  --quality-threshold 80 \
-  --split 0.8,0.1,0.1 \
-  --log-format json
-
-# B7. 控制面查询（FastAPI）
-uvicorn robot_dh.api.main:app --host 0.0.0.0 --port 8000 &
-curl -s http://127.0.0.1:8000/qc/runs | jq '.[0:2]'
-curl -s http://127.0.0.1:8000/ml-ready
-curl -s http://127.0.0.1:8000/workflows
-kill %1
+# B8. 一行摘要（每个 dataset 的 file count / size / manifest status / Argo 推荐参数）
+make local-devscale-summary
 ```
 
+验收：
+- `ls -lh /mnt/d/robot-dh-local/raw/{droid_lerobot_dev1g,robomimic_dev1g,bridgedata_v2_dev}/v1/` 都有数据；
+- `du -sh /mnt/d/robot-dh-local/raw` ≤ 3 GiB；
+- 每个 dataset 下都有 `_manifest.json` 且 `status="ok"`；
+- C 盘 / WSL `~` 没有任何新增大文件。
+
 ---
 
-### C. kind / K8s Argo 多源 DAG（30GB+ scale）
+### C. kind / K8s Argo Local DAG（默认入口，全程读 D 盘）
 
-前提：本地 kind 集群 `robot-dh` 已存在；Argo 已 install；已 build `robot-data-harness:local` 镜像并 `kind load`。
+前提：B 段已完成。本段不联远端，所有 raw / lake / archive logs 都在 PVC `robot-dh-local-data-pvc`（指向 kind node 的 `/mnt/local-data/robot-dh-local`，背后是 D 盘）。
+
+#### C-1. 一次性环境准备（首次跑必做，重跑可跳过）
 
 ```bash
-# C1. 准备 image
+# 1) 构建镜像并 load 到 kind
 make docker-build
-make kind-load
+kind load docker-image robot-data-harness:local --name robot-dh-dev
 
-# C2. 推平台 secret（不打印凭据）
-set -a; source client/robot-dh-platform.env; set +a
-./scripts/k8s_create_platform_secret_from_env.sh
-# 预期：[OK] secret robot-dh/robot-dh-v1-6-secrets 创建/更新成功
+# 2) 创建专用 kind cluster（D 盘已通过 extraMounts 挂进去）
+make local-create-kind-dev
+kubectl config use-context kind-robot-dh-dev
 
-# C3. apply v1.5 + v1.6 全部 Argo 资源
-make argo-apply-rbac
-make argo-apply-templates           # v1.5 三个 WorkflowTemplate
-make argo-apply-platform            # v1.6 三个 WorkflowTemplate + CronWorkflow
+# 3) apply PVC + RBAC + ConfigMap + v1.7 WorkflowTemplate / CronWorkflow
+make local-apply-data-pvc                  # PV + PVC + namespace
+make argo-local-apply                      # RBAC + ConfigMap + 3 个 WorkflowTemplate + 1 个 CronWorkflow
+```
 
-# C3.5 v1.6 archiveLogs：把 step pod stdout 归档到 s3://robot-dh-artifacts/argo-logs/
-#      详见 docs/v1_6_argo_log_archive_request.md / docs/v1_6_argo_log_archive_handoff.md
-#      重跑 C2 后必跑：C2 会 delete+create robot-dh ns 的 secret,
-#      argo ns 的同名 secret 不会自动跟着变,这一步把新 access/secret key 同步过去并刷新 ConfigMap
-make argo-enable-log-archive
-# = argo-sync-log-archive-secret + argo-apply-log-archive + argo-verify-log-archive
+#### C-2. 提交前体检（可选，建议首次跑跑一遍，重跑可跳过）
 
-# C4. smoke：检查 secret / image / template 是否齐
-make platform-smoke
+```bash
+# 1) 平台 smoke（doctor / datasets / image / context / PVC / template 六重体检；不会真提交）
+make v1-7-local-platform-smoke
 
-# C5. 提交多源 DAG（推荐 tmux，因 scale30 单次约 8~12h）
-make argo-submit-multisource-scale30
-# 或：make argo-submit-contract-qc       # 只跑 QC
-#     make argo-submit-ml-ready          # 只跑 ML-ready
+# 2) 调试 pod 进 kind node 直接 ls D 盘挂载点，确认 raw 目录里有 dev1g 数据
+make local-data-debug
+# 期望：/mnt/local-data/robot-dh-local/raw 下能看到 droid_lerobot_dev1g / robomimic_dev1g / bridgedata_v2_dev
+```
 
-# C6. 观察
-make argo-platform-status
-make argo-ui-port-forward                # 浏览器打开 https://localhost:2746
-make argo-platform-logs                  # 默认取最新 Workflow 全部 step pod 的 main 容器日志
-                                         # 想看 executor/init 噪声：LOG_CONTAINER=wait make argo-platform-logs
-make argo-platform-tail                  # follow 模式；WF=<wf-name> 指定，LOG_CONTAINER 同上
-kubectl -n robot-dh get workflows.argoproj.io -w
+#### C-3. 正式提交 devscale DAG（**主入口**）
 
-# C7. workflow 结束后把 status 写回 PG（Argo 末尾节点已自动调用，这是手动补救入口）
-make argo-sync-latest
+> **这就是日常跑全流程的命令**。会跑完整 20 节点 DAG：
+> `local-runtime-doctor → verify-devscale-data → adapter-probe-{droid,robomimic,bridge} → *-qc → *-normalize → *-features → build-ads → ml-ready-export → benchmark-regression → publish-lineage → argo-sync → archive-logs-index`。
 
-# C8. exporter（Prometheus）部署 + 验收
-make exporter-docker-build
-make exporter-kind-load
-make exporter-k8s-apply
-make exporter-port-forward &
-curl -s http://localhost:9108/healthz | jq         # 含 db_connected / last_scrape_time / last_scrape_error
-curl -s http://localhost:9108/metrics | grep robot_dh_qc_contract_runs_total
+```bash
+make argo-local-submit
+```
+
+#### C-4. 观察 / 实时日志
+
+```bash
+# 1) 真·follow live tail（v1.6 `kubectl logs -l ... -f` 漏 attach 后续 step pod 的问题在这里解决）
+make argo-local-tail
+
+# 2) UI 看完整 DAG 树（浏览器打开 https://localhost:2746）
+make argo-ui-port-forward
+
+# 3) 列所有 v1.7 workflow / CronWorkflow 状态
+make argo-local-status
+```
+
+#### C-5. workflow 跑完后收尾
+
+```bash
+# 把 status / 各 step duration / archive log URI 写回 PG（PG 不可用时加 DRY_RUN=1）
+make argo-local-sync
+# 或：DRY_RUN=1 make argo-local-sync
+```
+
+#### C-6. 调试 / 局部入口（按需，非主流程）
+
+```bash
+# 只跑 verify + 三 family qc（跳过 normalize / features / ml-ready）
+make argo-local-submit-qc
+
+# 只跑 build-ads + ml-ready（假设 lake/dwd 已就绪）
+make argo-local-submit-ml-ready
+
+# 拉最后一条 devscale workflow 的 main 容器日志（tail 500）
+make argo-local-logs
+
+# 删已 Succeeded/Failed/Error 的 v1.7 workflow
+make argo-local-clean-completed
 ```
 
 验收对照：
-- `s3://robot-lake/qc/<dataset_id>/<v1>/contract_report.json` 三种 family 都生成
-- `s3://robot-lake/ml-ready/scale30/v1/{train,val,test}.parquet` 已生成
-- PG 表 `qc_contract_runs / workflow_runs / workflow_steps / task_heartbeats / ml_ready_datasets / dataset_partitions / asset_profiles / openlineage_events` 有写入
-- `robot-dh-exporter` `/healthz` 返回 `db_connected: true`
-- Prometheus 抓 `robot_dh_workflow_steps_total{phase="Succeeded"}` > 0
-- `s3://robot-dh-artifacts/argo-logs/robot-dh/<workflow.name>/<pod.name>/main.log` 至少有 1 个对象（`CHECK_OBJECTS=1 MC_ALIAS=local make argo-verify-log-archive` 一键确认）
+
+- `kubectl -n robot-dh get wf -l role=devscale-main` 显示一条 `Succeeded` 的 workflow，phase `Succeeded`；
+- Argo UI 能看到 `local-runtime-doctor → verify-devscale-data → adapter-probe-{droid,robomimic,bridge} → *-qc → *-normalize → *-features → build-ads → ml-ready-export → benchmark-regression → publish-lineage → argo-sync → archive-logs-index` 的完整 20 节点 DAG；
+- `ls /mnt/d/robot-dh-local/lake/qc/{droid_lerobot_dev1g,robomimic_dev1g,bridgedata_v2_dev}/v1/contract_report.json` 三个都存在；
+- `ls /mnt/d/robot-dh-local/lake/ml-ready/devscale/v1/{train,val,test}.parquet` 三个都存在；
+- `ls /mnt/d/robot-dh-local/lake/argo-logs/robot-dh/<wf-name>/` 每个 pod 都有 `main.log`；
+- 跑完后 `du -sh ~ /mnt/c` 几乎不变（lake 全部在 D 盘 PVC 内）；
+- 默认 workflow **不读** 远端 `s3://robot-datasets/raw/...`；如果你想跑远端 scale30，必须**显式** `make argo-submit-multisource-scale30`。
 
 ---
 
 ### D. 完整命令一行版（仅本地，最短验收路径）
 
-如果只想"5 行内"证明仓库 v1.6 可跑：
+如果只想"7 行内"证明仓库 v1.7 可跑（不动 kind，纯 Python）：
 
 ```bash
 make setup
-make test                                  # 244 passed, 14 skipped
+make test                                  # 312 passed, 14 skipped
 ( cd go/robot-dh-exporter && GOPROXY=https://goproxy.cn,direct go test ./... )
+make v1-7-local-smoke                      # adapter list + heartbeat + datasets list
 make demo-data
 robot-dh etl run --dataset samples/button_press_001 --dataset-id button_press_001 --version v1 \
   --lake-root runs/lake --phase normalize --resume
+robot-dh qc contract run --dataset-family universal --dataset-uri samples/button_press_001 \
+  --dataset-id button_press_001 --version v1 --output runs/qc/button_press_001/v1 \
+  --contract configs/qc/universal.yaml --log-format json
 ```
 
-> 跑通后可以接 B / C 两段做远端联调。耗时较长的远端命令建议放进 tmux 或 Argo。
+> 跑通后接 B 段同步 D 盘 devscale，C 段拉起 kind + Argo Local DAG。远端 scale30 不再是默认。
+
+---
+
+## v1.6 端到端命令清单（远端 scale30）
+
+> **历史保留**：仅在远端 PG / MinIO 联调或需要 30 GB+ 数据回归测试时手动跑。日常开发 / demo 一律走上面的 v1.7 三段。
+
+> **依赖前提**：远端 PG（含 v1.5 + v1.6 schema）/ MinIO（含 `robot-datasets` / `robot-lake`）/ Redis 已就绪，白名单已放行 WSL host；`client/robot-dh-platform.env`（chmod 600）已就位。
+
+### B'. WSL 公网直连远端 PG / MinIO / Redis
+
+```bash
+# B'1. 加载平台 env（不入 git）
+ls -l client/robot-dh-platform.env   # 期望 -rw------- 600
+set -a; source client/robot-dh-platform.env; set +a
+
+# B'2. 健康检查
+robot-dh infra doctor --check db,s3,redis,lake
+
+# B'3. 多源 QC contract（DROID / robomimic / Bridge）
+robot-dh qc contract run --dataset-family droid \
+  --dataset-uri  s3://robot-datasets/raw/droid_lerobot_scale30/v1 \
+  --dataset-id   droid_lerobot_scale30 --version v1 \
+  --output       s3://robot-lake/qc/droid_lerobot_scale30/v1 \
+  --contract     configs/qc/droid_contract.yaml --log-format json
+robot-dh qc contract run --dataset-family robomimic \
+  --dataset-uri  s3://robot-datasets/raw/robomimic_scale30/v1 \
+  --dataset-id   robomimic_scale30 --version v1 \
+  --output       s3://robot-lake/qc/robomimic_scale30/v1 \
+  --contract     configs/qc/robomimic_contract.yaml --log-format json
+robot-dh qc contract run --dataset-family bridge \
+  --dataset-uri  s3://robot-datasets/raw/bridgedata_v2_scale30/v1 \
+  --dataset-id   bridgedata_v2_scale30 --version v1 \
+  --output       s3://robot-lake/qc/bridgedata_v2_scale30/v1 \
+  --contract     configs/qc/bridge_contract.yaml --log-format json
+
+# B'4. partition plan + phase-level normalize + ml-ready 全量三源（详见 v1.6 历史文档）
+robot-dh partition plan --dataset s3://robot-datasets/raw/droid_lerobot_scale30/v1 \
+  --dataset-id droid_lerobot_scale30 --version v1 \
+  --output s3://robot-lake/tmp/partitions/droid_lerobot_scale30_v1.json \
+  --target-partition-size-gb 2
+robot-dh etl run --dataset s3://robot-datasets/raw/droid_lerobot_scale30/v1 \
+  --dataset-id droid_lerobot_scale30 --version v1 --lake-root s3://robot-lake \
+  --phase normalize --resume --heartbeat-interval-sec 30 --log-format json
+robot-dh ml-ready export \
+  --input-root s3://robot-lake/dwd --quality-root s3://robot-lake/ads/quality \
+  --qc-root s3://robot-lake/qc --output s3://robot-lake/ml-ready/scale30/v1 \
+  --dataset-id scale30 --version v1 --quality-threshold 80 --split 0.8,0.1,0.1 --log-format json
+```
+
+### C'. kind / K8s Argo 多源 scale30 DAG（手动压测）
+
+```bash
+# C'1. image + secret
+make docker-build && make kind-load
+set -a; source client/robot-dh-platform.env; set +a
+./scripts/k8s_create_platform_secret_from_env.sh
+
+# C'2. apply v1.5 + v1.6 全部 Argo 资源（含 archiveLogs）
+make argo-apply-rbac && make argo-apply-templates && make argo-apply-platform
+make argo-enable-log-archive
+
+# C'3. 提交 scale30 DAG（推荐 tmux，单次约 8~12h）
+make argo-submit-multisource-scale30      # 注意：这是 v1.6 远端 30 GiB workflow，非默认
+
+# C'4. 观察 / 同步 / exporter
+make argo-platform-status
+make argo-ui-port-forward                 # 浏览器 https://localhost:2746
+make argo-platform-tail                   # follow；WF=<wf-name> 覆盖
+make argo-sync-latest                     # 把 status 写回 PG
+make exporter-docker-build && make exporter-kind-load && make exporter-k8s-apply
+make exporter-port-forward &
+curl -s http://localhost:9108/healthz | jq
+```
+
+验收对照：
+
+- `s3://robot-lake/qc/<dataset_id>/v1/contract_report.json` 三 family 都生成；
+- `s3://robot-lake/ml-ready/scale30/v1/{train,val,test}.parquet` 已生成；
+- PG 表 `qc_contract_runs / workflow_runs / workflow_steps / task_heartbeats / ml_ready_datasets / dataset_partitions / asset_profiles / openlineage_events` 有写入；
+- `robot-dh-exporter` `/healthz` 返回 `db_connected: true`；
+- Prometheus 抓 `robot_dh_workflow_steps_total{phase="Succeeded"}` > 0；
+- `s3://robot-dh-artifacts/argo-logs/robot-dh/<workflow.name>/<pod.name>/main.log` 至少 1 个对象（`CHECK_OBJECTS=1 MC_ALIAS=local make argo-verify-log-archive` 一键确认）。
+
+---
+
+## v1.7 — Local-First Data Runtime（Windows D 盘 + 专用 kind）
+
+> 目标：让 Argo workflow 不再从腾讯云 MinIO 跨公网拉 18 GiB DROID / 6 GiB robomimic
+> 到 Docker Desktop / WSL VHDX，而是把 ≤ 3 GB 的 devscale 数据一次性同步到 Windows
+> D 盘，kind 通过 `extraMounts` 挂载 D 盘目录到 node，Pod 直接读本地。
+> 详见 [`docs/v1_7_local_data_runtime.md`](docs/v1_7_local_data_runtime.md) +
+> [`docs/v1_7_windows_d_drive_kind_mount.md`](docs/v1_7_windows_d_drive_kind_mount.md)。
+
+### 三层数据策略
+
+| 层 | 体量 | 路径 | 触发 |
+|---|---|---|---|
+| devscale（默认） | ≤ 3 GB | `D:\robot-dh-local\raw\<dataset_id>\v1` | `make local-*` 一条龙 |
+| scale30 | ~25 GiB / 次 | `s3://robot-datasets/raw/<dataset>_scale30/v1` | 手动 `make argo-submit-multisource-scale30` |
+| full | TB 级 | 数据湖 / 公司 | 不在本仓库 scope |
+
+### devscale 数据清单（`configs/devscale_datasets.yaml`）
+
+- `droid_lerobot_dev1g`（≤ 1.2 GB）：`meta/**` + 单 parquet shard + 单一视图 mp4
+- `robomimic_dev1g`（≤ 0.9 GB）：前 3 个 `low_dim*.hdf5`
+- `bridgedata_v2_dev`（≤ 0.4 GB）：前 10 个 `data/*.parquet` + meta + README
+
+`total_max_bytes = 3 GB` 由 `local_plan_devscale_sync.sh` 严格执行；超过即拒绝下载（`--allow-over-limit` 强制覆盖）。
+
+### 路径四层映射
+
+```
+Windows : D:\robot-dh-local              (Docker Desktop File Sharing)
+WSL     : /mnt/d/robot-dh-local          (kind extraMounts: hostPath -> containerPath)
+kind node : /mnt/local-data/robot-dh-local (PV hostPath)
+Pod     : /mnt/local-data/robot-dh-local
+```
+
+> 全部路径不允许落到 `/mnt/c` 或 WSL ext4 VHDX；脚本里有 hard guard。
+
+### 一条龙命令
+
+```bash
+source client/robot-dh-v1-6.env          # 复用 v1.6 secret 中的 S3 AK/SK
+
+make local-preflight                     # /mnt/d / df / docker / kind / kubectl / mc / jq / yq
+make local-init-data                     # D:\robot-dh-local 目录骨架
+make local-mc-alias                      # mc alias set robotdh-remote ...
+make local-plan-devscale                 # devscale_plan.json + .md（不下载）
+make local-sync-devscale                 # mc cp 并发下载（默认 4 并发 / 3 重试）
+                                         # 完成后自动 verify
+make local-verify-devscale               # 也可手动复跑
+make local-create-kind-dev               # kind cluster robot-dh-dev
+kubectl config use-context kind-robot-dh-dev
+make local-apply-data-pvc                # k8s/v1_7_local/*.yaml (ns + PV/PVC + cm + debug pod)
+make local-data-debug                    # exec ls /mnt/local-data/robot-dh-local/raw
+make local-devscale-summary              # 表格化展示三个 dataset 的本地状态
+```
+
+### Argo workflow 用本地数据
+
+```bash
+kubectl --context kind-robot-dh-dev -n robot-dh create -f - <<'EOF'
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: robot-dh-devscale-droid-
+spec:
+  workflowTemplateRef:
+    name: robot-dh-multisource-scale30
+  arguments:
+    parameters:
+      - name: dataset_uri
+        value: "file:///mnt/local-data/robot-dh-local/raw/droid_lerobot_dev1g/v1"
+      - name: dataset_id
+        value: "droid_lerobot_dev1g"
+      - name: dataset_family
+        value: "droid"
+      - name: dataset_version
+        value: "v1"
+EOF
+```
+
+### 重要约束
+
+- `make local-destroy-kind-dev` 需要 stdin 输入 `DELETE_DEV_KIND` 二次确认；
+- `make local-create-kind-dev --recreate` 需要 stdin 输入 `RECREATE_KIND` 二次确认；
+- `--force-clean` 清 D 盘数据需要输入 `YES` 二次确认；
+- 任何 target 都不会自动重建 cluster、不会自动清数据。
+
+## v1.7 — Local-First Robot Data Platform Runtime（adapter / 本地 file URI / 容灾）
+
+> 第一阶段（`v1.7 Local-First Data Runtime`）解决了**数据怎么同步到 D 盘 + kind 怎么挂**；
+> 第二阶段（本节）解决**Python 平台层怎么直读本地 file URI、怎么按 family 路由 probe / normalize / contract、怎么在心跳卡死时拿到 archive log**。
+
+### 设计要点
+
+1. **本地 file URI 是一等公民**：`robot_dh.lake.uri` 新增 `is_file_uri / to_file_uri / to_local_path`，统一处理 `file:///abs/path`、裸 `/abs/path`、`./relative` 三种形态；
+2. **normalize / etl 直读本地**：`_materialize_input` 检测到 `is_local_uri` 时直接返回 `Path(local_path)`，**不再** 把整目录复制到 `/tmp/robot-dh/input-cache`；走本地路径会打 `materialize_input: using local direct input, no download` 一行日志，方便审计；
+3. **adapter 注册表**：`src/robot_dh/adapters/` 提供 `DroidLeRobotAdapter / RobomimicAdapter / BridgeDataAdapter / UniversalAdapter`；按 layout markers + dataset_id 前缀打分，confidence 最高者命中。`configs/dataset_adapters.yaml` 只放参数 override；
+4. **容灾**：bridge / robomimic 远端 probe 都允许 `probe_timeout_sec` / `max_retries` / `fail_fast`；超时统一标 `cause_type=REMOTE_PARQUET_TIMEOUT`，与 v1.6.7 `_summarize_exception` 同口径；
+5. **runtime doctor / verify**：`robot-dh local runtime doctor` 一次性检查 D 盘目录、devscale manifest、总大小限额；`robot-dh local datasets verify` 把 plan / `_manifest.json` 与本地实文件做大小比对；
+6. **heartbeat stale check**：`robot-dh runtime heartbeat check` 扫 `runs/events/heartbeats_*.jsonl`（或 PG `task_heartbeats`），按 `(workflow, phase, step)` 取最新一拍，超过 `--stale-after-sec` 直接退 1；
+7. **argo logs index**：`robot-dh argo logs index --workflow-name ...` 从 `kubectl get workflow -o json`（或 `--from-json`）派生每个 step pod 的 `s3://robot-dh-artifacts/argo-logs/.../main.log` URI，写回 `workflow_steps.metrics` JSON 字段（PG schema 没列就降级 warning，不抛）。
+
+### 新增 CLI
+
+```bash
+robot-dh local runtime doctor                                    # D 盘 / manifest / 总量体检
+robot-dh local datasets list   --devscale-config configs/devscale_datasets.yaml
+robot-dh local datasets verify --devscale-config configs/devscale_datasets.yaml
+
+robot-dh adapter list
+robot-dh adapter detect --dataset-uri file:///mnt/local-data/robot-dh-local/raw/droid_lerobot_dev1g/v1 \
+                        --dataset-id droid_lerobot_dev1g
+robot-dh adapter probe  --dataset-uri file:///mnt/.../robomimic_dev1g/v1 \
+                        --family robomimic --option max_workers=4 --option fail_fast=true
+
+robot-dh runtime heartbeat check --workflow-name robot-dh-multisource-scale30-xxxx \
+                                  --warn-after-sec 120 --stale-after-sec 300 --fail-on stale
+
+robot-dh argo logs index --workflow-name robot-dh-multisource-scale30-xxxx \
+                          --archive-root s3://robot-dh-artifacts/argo-logs
+```
+
+### 新增 Makefile target
+
+| target                        | 说明                                                                            |
+|-------------------------------|---------------------------------------------------------------------------------|
+| `make local-runtime-doctor`   | runtime doctor，缺 manifest / 超 3 GiB 直接退 1                                  |
+| `make local-datasets-list`    | 列 devscale 数据集（含运行时已重定向到 k8s 节点的本地路径）                      |
+| `make local-datasets-verify`  | plan / `_manifest.json` vs 本地实文件                                            |
+| `make local-adapter-list`     | 列已注册 adapter 与 yaml override                                                |
+| `make local-adapter-detect`   | `DATASET_URI=... DATASET_ID=...` 走 detect                                       |
+| `make local-adapter-probe`    | `DATASET_URI=... [FAMILY=...]` 走 probe                                          |
+| `make local-qc-devscale`      | `DATASET_ID=... FAMILY=...` 跑 contract，写 `lake/qc/<id>/contract_report.json`  |
+| `make local-etl-devscale`     | `DATASET_ID=...` 走 raw → ods → dwd（lake_root 默认本地 file URI）              |
+| `make local-ml-ready-devscale`| `DATASET_ID=...` 导出 ml-ready bundle 到 `lake/ml-ready/<id>`                    |
+| `make local-heartbeat-check`  | `WORKFLOW=...` 心跳超时哨兵                                                     |
+| `make local-argo-logs-index`  | `WORKFLOW=... [NS=robot-dh] [DRY_RUN=1]` 把 archive log URI 写回 PG metrics      |
+| `make v1-7-local-smoke`       | adapter list + heartbeat check + datasets list 三合一离线 smoke（无需远端）     |
+
+### 验收命令（无远端依赖）
+
+```bash
+source client/robot-dh-v1-6.env   # 仅为了 PG / S3 凭据；不强制
+make v1-7-local-smoke             # 三合一 smoke
+robot-dh adapter list
+robot-dh adapter detect --dataset-uri /tmp/empty --dataset-id robomimic_dev1g
+robot-dh runtime heartbeat check --events-dir runs/events --fail-on never
+pytest tests/test_local_runtime_paths.py tests/test_devscale_registry.py \
+       tests/test_local_file_uri_etl.py tests/test_adapters_registry.py \
+       tests/test_adapter_robomimic_local.py tests/test_adapter_droid_lerobot_local.py \
+       tests/test_adapter_bridge_local.py tests/test_heartbeat_stale.py \
+       tests/test_argo_logs_index.py tests/test_v1_7_cli_smoke.py
+```
+
+### 已落地的反模式守门
+
+- `_materialize_input` 在 local URI 下 **必须** 直接返回源路径并打 `using local direct input` 日志（`tests/test_local_file_uri_etl.py`）；
+- bridge 远端 probe 超时 **必须** 标 `cause_type=REMOTE_PARQUET_TIMEOUT`（`tests/test_adapter_bridge_local.py`）；
+- robomimic adapter `fail_fast=True` 命中 broken hdf5 **必须** 返回 status=FAIL（`tests/test_adapter_robomimic_local.py`）；
+- argo logs index 上游 PG schema 缺列时 **必须** 走 warning 而非抛（`tests/test_argo_logs_index.py::test_write_log_records_continues_when_upsert_raises`）。
+
+

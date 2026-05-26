@@ -1,0 +1,12 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: robot-dh-local-qc-
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: v1-7-local
+    role: devscale-qc
+spec:
+  workflowTemplateRef:
+    name: robot-dh-local-qc

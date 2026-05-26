@@ -46,6 +46,51 @@ def test_profile_dataset_marks_warn_when_probe_fails(tmp_path: Path) -> None:
     assert profile.profile["probe_failure_count"] == 1
 
 
+def test_probe_hdf5_uri_does_not_delete_local_source(tmp_path: Path) -> None:
+    """v1.7（本地 file:// URI）：``_materialize_local`` 对本地 URI 直接返回原 path，
+    ``_probe_hdf5_uri`` 必须**不能** unlink，否则把 raw 源数据自身删了。
+    本测试是 v1.7 local devscale workflow robomimic-normalize 不再凭空丢失 hdf5
+    的强守门——回归一次整 raw 数据就报废，CI 必挂。
+    """
+    import h5py
+    from robot_dh.qc.profile import _probe_hdf5_uri
+
+    src = tmp_path / "raw" / "robomimic_fake" / "v1" / "low_dim_v15.hdf5"
+    src.parent.mkdir(parents=True)
+    with h5py.File(src, "w") as f:
+        data_grp = f.create_group("data")
+        demo = data_grp.create_group("demo_0")
+        demo.create_dataset("actions", data=[[0.0] * 7] * 8)
+    assert src.is_file()
+
+    uri = f"file://{src.as_posix()}"
+    out = _probe_hdf5_uri(uri, tmp_path / "qc-tmp")
+
+    assert out.get("readable") is True
+    # 关键断言：probe 完源文件还在
+    assert src.is_file(), "probe_hdf5_uri must NOT unlink local source files"
+
+
+def test_probe_video_uri_does_not_delete_local_source(tmp_path: Path) -> None:
+    """同款守门：本地 file:// mp4 不能被 probe 完 unlink。"""
+    from unittest.mock import patch
+
+    from robot_dh.qc.profile import _probe_video_uri
+
+    src = tmp_path / "raw" / "v1" / "videos" / "obs.mp4"
+    src.parent.mkdir(parents=True)
+    src.write_bytes(b"\x00\x00\x00\x18ftypisom")
+    assert src.is_file()
+
+    uri = f"file://{src.as_posix()}"
+    # mock probe_video 避免依赖真实 ffmpeg，仅验证 unlink 不发生
+    with patch("robot_dh.qc.profile.probe_video", return_value={"readable": True, "fps": 30}):
+        out = _probe_video_uri(uri, tmp_path / "qc-tmp")
+
+    assert out.get("readable") is True
+    assert src.is_file(), "probe_video_uri must NOT unlink local source files"
+
+
 def test_summarize_exception_falls_back_to_context_when_cause_missing() -> None:
     """v1.6.7：botocore.exceptions.RetriesExceededError 这种 ``raise`` 不带 ``from``
     的异常，``__cause__`` 永远是 None；fallback 到 ``__context__`` 才能拿到根因。

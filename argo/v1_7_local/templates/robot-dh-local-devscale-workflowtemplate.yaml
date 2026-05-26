@@ -1,0 +1,729 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: robot-dh-local-devscale
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: v1-7-local
+    role: devscale-main
+  annotations:
+    robot-dh.io/scope: "devscale"
+    robot-dh.io/data-source: "local-pvc"
+    robot-dh.io/scale-note: "<=3GB; do not point this template at scale30 raw"
+spec:
+  serviceAccountName: robot-dh-workflow
+  entrypoint: main
+  ttlStrategy:
+    secondsAfterCompletion: 86400
+    secondsAfterFailure: 172800
+    secondsAfterSuccess: 86400
+  podGC:
+    strategy: OnWorkflowCompletion
+  # 整 workflow 上限 2h；devscale 全链路实测应远小于此值
+  activeDeadlineSeconds: 7200
+  podSpecPatch: |
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      fsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+  arguments:
+    parameters:
+      - name: local_data_root
+        value: "/mnt/local-data/robot-dh-local"
+      - name: raw_root
+        value: "file:///mnt/local-data/robot-dh-local/raw"
+      - name: lake_root
+        value: "file:///mnt/local-data/robot-dh-local/lake"
+      - name: input_cache_dir
+        value: "/mnt/local-data/robot-dh-local/cache/input-cache"
+      - name: droid_dataset_id
+        value: "droid_lerobot_dev1g"
+      - name: robomimic_dataset_id
+        value: "robomimic_dev1g"
+      - name: bridge_dataset_id
+        value: "bridgedata_v2_dev"
+      - name: version
+        value: "v1"
+      - name: quality_threshold
+        value: "80"
+      - name: max_workers
+        value: "4"
+      - name: heartbeat_interval_sec
+        value: "30"
+      - name: fail_on_contract_fail
+        value: "false"
+      - name: archive_root
+        value: "file:///mnt/local-data/robot-dh-local/lake/argo-logs"
+  volumeClaimTemplates: []
+  volumes:
+    - name: local-data
+      persistentVolumeClaim:
+        claimName: robot-dh-local-data-pvc
+  templates:
+    # ============================== 主 DAG ==============================
+    - name: main
+      dag:
+        tasks:
+          - name: local-runtime-doctor
+            template: local-runtime-doctor
+
+          - name: verify-devscale-data
+            depends: "local-runtime-doctor"
+            template: verify-devscale-data
+
+          # ---- 三个 family 独立 probe，verify 通过后并行 ----
+          - name: adapter-probe-droid
+            depends: "verify-devscale-data"
+            template: adapter-probe
+            arguments:
+              parameters:
+                - {name: family,         value: "droid"}
+                - {name: dataset_id,     value: "{{workflow.parameters.droid_dataset_id}}"}
+
+          - name: adapter-probe-robomimic
+            depends: "verify-devscale-data"
+            template: adapter-probe
+            arguments:
+              parameters:
+                - {name: family,         value: "robomimic"}
+                - {name: dataset_id,     value: "{{workflow.parameters.robomimic_dataset_id}}"}
+
+          - name: adapter-probe-bridge
+            depends: "verify-devscale-data"
+            template: adapter-probe
+            arguments:
+              parameters:
+                - {name: family,         value: "bridge"}
+                - {name: dataset_id,     value: "{{workflow.parameters.bridge_dataset_id}}"}
+
+          # ---- 三个 family 各自的 QC -> normalize -> features ----
+          - name: droid-qc
+            depends: "adapter-probe-droid"
+            template: qc-contract-run
+            arguments:
+              parameters:
+                - {name: family,        value: "droid"}
+                - {name: dataset_id,    value: "{{workflow.parameters.droid_dataset_id}}"}
+                - {name: contract_path, value: "configs/qc/droid_contract.yaml"}
+                - {name: extra_flags,   value: ""}
+
+          - name: robomimic-qc
+            depends: "adapter-probe-robomimic"
+            template: qc-contract-run
+            arguments:
+              parameters:
+                - {name: family,        value: "robomimic"}
+                - {name: dataset_id,    value: "{{workflow.parameters.robomimic_dataset_id}}"}
+                - {name: contract_path, value: "configs/qc/robomimic_contract.yaml"}
+                # robomimic 并发 QC：4 路 worker，每文件 5 min 硬截
+                - {name: extra_flags,   value: "--max-workers {{workflow.parameters.max_workers}} --file-timeout-sec 300"}
+
+          - name: bridge-qc
+            depends: "adapter-probe-bridge"
+            template: qc-contract-run
+            arguments:
+              parameters:
+                - {name: family,        value: "bridge"}
+                - {name: dataset_id,    value: "{{workflow.parameters.bridge_dataset_id}}"}
+                - {name: contract_path, value: "configs/qc/bridge_contract.yaml"}
+                # bridge devscale 全部走本地 file URI，禁用 remote lazy 兜底
+                - {name: extra_flags,   value: "--probe-timeout-sec 120 --max-retries 2 --disable-remote-lazy"}
+
+          - name: droid-normalize
+            depends: "droid-qc"
+            template: etl-phase
+            arguments:
+              parameters:
+                - {name: dataset_id, value: "{{workflow.parameters.droid_dataset_id}}"}
+                - {name: phase,      value: "normalize"}
+          - name: droid-features
+            depends: "droid-normalize"
+            template: etl-phase
+            arguments:
+              parameters:
+                - {name: dataset_id, value: "{{workflow.parameters.droid_dataset_id}}"}
+                - {name: phase,      value: "features"}
+
+          - name: robomimic-normalize
+            depends: "robomimic-qc"
+            template: etl-phase
+            arguments:
+              parameters:
+                - {name: dataset_id, value: "{{workflow.parameters.robomimic_dataset_id}}"}
+                - {name: phase,      value: "normalize"}
+          - name: robomimic-features
+            depends: "robomimic-normalize"
+            template: etl-phase
+            arguments:
+              parameters:
+                - {name: dataset_id, value: "{{workflow.parameters.robomimic_dataset_id}}"}
+                - {name: phase,      value: "features"}
+
+          - name: bridge-normalize
+            depends: "bridge-qc"
+            template: etl-phase
+            arguments:
+              parameters:
+                - {name: dataset_id, value: "{{workflow.parameters.bridge_dataset_id}}"}
+                - {name: phase,      value: "normalize"}
+          - name: bridge-features
+            depends: "bridge-normalize"
+            template: etl-phase
+            arguments:
+              parameters:
+                - {name: dataset_id, value: "{{workflow.parameters.bridge_dataset_id}}"}
+                - {name: phase,      value: "features"}
+
+          # ---- 汇聚：build-ads -> ml-ready -> benchmark -> lineage -> sync -> logs index ----
+          - name: build-ads
+            depends: "droid-features && robomimic-features && bridge-features"
+            template: build-ads
+
+          - name: ml-ready-export
+            depends: "build-ads"
+            template: ml-ready-export
+
+          - name: benchmark-regression
+            depends: "ml-ready-export"
+            template: benchmark-regression
+
+          - name: publish-lineage
+            depends: "benchmark-regression"
+            template: publish-lineage
+
+          - name: argo-sync
+            depends: "publish-lineage"
+            template: argo-sync
+
+          - name: archive-logs-index
+            depends: "argo-sync"
+            template: archive-logs-index
+
+    # ============================== 节点模板 ==============================
+    # 公共 podSpecPatch：每个 step 都挂 PVC + emptyDir(/tmp) + nonRoot
+    # ----------------------------------------------------------------------
+    - name: local-runtime-doctor
+      podSpecPatch: |
+        terminationGracePeriodSeconds: 30
+      volumes:
+        - name: local-data
+          persistentVolumeClaim:
+            claimName: robot-dh-local-data-pvc
+        - name: tmp
+          emptyDir: {sizeLimit: 256Mi}
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -o pipefail
+            python -u -m robot_dh.cli local runtime doctor --log-format json 2>&1 | tee /tmp/runtime-doctor.log
+        env:
+          - {name: ROBOT_DH_LOCAL_DATA_ROOT, value: "{{workflow.parameters.local_data_root}}"}
+          - {name: ROBOT_DH_K8S_LOCAL_DATA_ROOT, value: "{{workflow.parameters.local_data_root}}"}
+          - {name: ROBOT_DH_DEV_DATA_ROOT,   value: "{{workflow.parameters.raw_root}}"}
+          - {name: ROBOT_DH_DEV_LAKE_ROOT,   value: "{{workflow.parameters.lake_root}}"}
+          - {name: ROBOT_DH_INPUT_CACHE_DIR, value: "{{workflow.parameters.input_cache_dir}}"}
+          - {name: PYTHONUNBUFFERED,         value: "1"}
+        envFrom:
+          - configMapRef: {name: robot-dh-local-runtime, optional: true}
+        volumeMounts:
+          - {name: local-data, mountPath: /mnt/local-data/robot-dh-local}
+          - {name: tmp,        mountPath: /tmp}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 250m, memory: 512Mi}
+          limits:   {cpu: 1,    memory: 2Gi}
+      activeDeadlineSeconds: 900
+      retryStrategy:
+        limit: 1
+        retryPolicy: "Always"
+
+    - name: verify-devscale-data
+      podSpecPatch: |
+        terminationGracePeriodSeconds: 30
+      volumes:
+        - name: local-data
+          persistentVolumeClaim:
+            claimName: robot-dh-local-data-pvc
+        - name: tmp
+          emptyDir: {sizeLimit: 256Mi}
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -o pipefail
+            python -u -m robot_dh.cli local datasets verify --log-format json 2>&1 | tee /tmp/verify-devscale.log
+        env:
+          - {name: ROBOT_DH_LOCAL_DATA_ROOT, value: "{{workflow.parameters.local_data_root}}"}
+          - {name: ROBOT_DH_K8S_LOCAL_DATA_ROOT, value: "{{workflow.parameters.local_data_root}}"}
+          - {name: ROBOT_DH_DEV_DATA_ROOT,   value: "{{workflow.parameters.raw_root}}"}
+          - {name: ROBOT_DH_DEV_LAKE_ROOT,   value: "{{workflow.parameters.lake_root}}"}
+          - {name: ROBOT_DH_INPUT_CACHE_DIR, value: "{{workflow.parameters.input_cache_dir}}"}
+          - {name: PYTHONUNBUFFERED,         value: "1"}
+        envFrom:
+          - configMapRef: {name: robot-dh-local-runtime, optional: true}
+        volumeMounts:
+          - {name: local-data, mountPath: /mnt/local-data/robot-dh-local}
+          - {name: tmp,        mountPath: /tmp}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 250m, memory: 512Mi}
+          limits:   {cpu: 1,    memory: 2Gi}
+      activeDeadlineSeconds: 900
+      retryStrategy:
+        limit: 1
+        retryPolicy: "Always"
+
+    - name: adapter-probe
+      inputs:
+        parameters:
+          - {name: family}
+          - {name: dataset_id}
+      podSpecPatch: |
+        terminationGracePeriodSeconds: 30
+      volumes:
+        - name: local-data
+          persistentVolumeClaim:
+            claimName: robot-dh-local-data-pvc
+        - name: tmp
+          emptyDir: {sizeLimit: 256Mi}
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -o pipefail
+            python -u -m robot_dh.cli adapter probe \
+              --dataset-uri "{{workflow.parameters.raw_root}}/{{inputs.parameters.dataset_id}}/{{workflow.parameters.version}}" \
+              --dataset-id "{{inputs.parameters.dataset_id}}" \
+              --family "{{inputs.parameters.family}}" \
+              --log-format json 2>&1 | tee /tmp/adapter-probe-{{inputs.parameters.family}}.log
+        env:
+          - {name: ROBOT_DH_LOCAL_DATA_ROOT, value: "{{workflow.parameters.local_data_root}}"}
+          - {name: ROBOT_DH_K8S_LOCAL_DATA_ROOT, value: "{{workflow.parameters.local_data_root}}"}
+          - {name: ROBOT_DH_DEV_DATA_ROOT,   value: "{{workflow.parameters.raw_root}}"}
+          - {name: ROBOT_DH_DEV_LAKE_ROOT,   value: "{{workflow.parameters.lake_root}}"}
+          - {name: ROBOT_DH_INPUT_CACHE_DIR, value: "{{workflow.parameters.input_cache_dir}}"}
+          - {name: PYTHONUNBUFFERED,         value: "1"}
+        envFrom:
+          - configMapRef: {name: robot-dh-local-runtime, optional: true}
+        volumeMounts:
+          - {name: local-data, mountPath: /mnt/local-data/robot-dh-local}
+          - {name: tmp,        mountPath: /tmp}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 250m, memory: 512Mi}
+          limits:   {cpu: 1,    memory: 2Gi}
+      activeDeadlineSeconds: 900
+      retryStrategy:
+        limit: 1
+        retryPolicy: "Always"
+
+    - name: qc-contract-run
+      inputs:
+        parameters:
+          - {name: family}
+          - {name: dataset_id}
+          - {name: contract_path}
+          - {name: extra_flags,  default: ""}
+      podSpecPatch: |
+        terminationGracePeriodSeconds: 30
+      volumes:
+        - name: local-data
+          persistentVolumeClaim:
+            claimName: robot-dh-local-data-pvc
+        - name: tmp
+          emptyDir: {sizeLimit: 512Mi}
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -o pipefail
+            python -u -m robot_dh.cli qc contract run \
+              --dataset-family "{{inputs.parameters.family}}" \
+              --dataset-uri "{{workflow.parameters.raw_root}}/{{inputs.parameters.dataset_id}}/{{workflow.parameters.version}}" \
+              --dataset-id "{{inputs.parameters.dataset_id}}" \
+              --version "{{workflow.parameters.version}}" \
+              --output "{{workflow.parameters.lake_root}}/qc/{{inputs.parameters.dataset_id}}/{{workflow.parameters.version}}" \
+              --contract "{{inputs.parameters.contract_path}}" \
+              {{inputs.parameters.extra_flags}} \
+              --log-format json 2>&1 | tee /tmp/qc-{{inputs.parameters.family}}.log
+        env:
+          - {name: ROBOT_DH_LOCAL_DATA_ROOT, value: "{{workflow.parameters.local_data_root}}"}
+          - {name: ROBOT_DH_K8S_LOCAL_DATA_ROOT, value: "{{workflow.parameters.local_data_root}}"}
+          - {name: ROBOT_DH_DEV_DATA_ROOT,   value: "{{workflow.parameters.raw_root}}"}
+          - {name: ROBOT_DH_DEV_LAKE_ROOT,   value: "{{workflow.parameters.lake_root}}"}
+          - {name: ROBOT_DH_INPUT_CACHE_DIR, value: "{{workflow.parameters.input_cache_dir}}"}
+          - {name: PYTHONUNBUFFERED,         value: "1"}
+          - {name: ROBOT_DH_QC_PROBE_CONCURRENCY, value: "{{workflow.parameters.max_workers}}"}
+        envFrom:
+          - configMapRef: {name: robot-dh-local-runtime, optional: true}
+        volumeMounts:
+          - {name: local-data, mountPath: /mnt/local-data/robot-dh-local}
+          - {name: tmp,        mountPath: /tmp}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 250m, memory: 512Mi}
+          limits:   {cpu: 1,    memory: 2Gi}
+      activeDeadlineSeconds: 900
+      retryStrategy:
+        limit: 1
+        retryPolicy: "Always"
+
+    - name: etl-phase
+      inputs:
+        parameters:
+          - {name: dataset_id}
+          - {name: phase}
+      podSpecPatch: |
+        terminationGracePeriodSeconds: 30
+      volumes:
+        - name: local-data
+          persistentVolumeClaim:
+            claimName: robot-dh-local-data-pvc
+        - name: tmp
+          emptyDir: {sizeLimit: 2Gi}
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -o pipefail
+            python -u -m robot_dh.cli etl run \
+              --dataset "{{workflow.parameters.raw_root}}/{{inputs.parameters.dataset_id}}/{{workflow.parameters.version}}" \
+              --dataset-id "{{inputs.parameters.dataset_id}}" \
+              --version "{{workflow.parameters.version}}" \
+              --lake-root "{{workflow.parameters.lake_root}}" \
+              --phase "{{inputs.parameters.phase}}" \
+              --resume \
+              --heartbeat-interval-sec "{{workflow.parameters.heartbeat_interval_sec}}" \
+              --workflow-name "{{workflow.name}}" \
+              --log-format json 2>&1 | tee /tmp/etl-{{inputs.parameters.dataset_id}}-{{inputs.parameters.phase}}.log
+        env:
+          - {name: ROBOT_DH_LOCAL_DATA_ROOT, value: "{{workflow.parameters.local_data_root}}"}
+          - {name: ROBOT_DH_K8S_LOCAL_DATA_ROOT, value: "{{workflow.parameters.local_data_root}}"}
+          - {name: ROBOT_DH_DEV_DATA_ROOT,   value: "{{workflow.parameters.raw_root}}"}
+          - {name: ROBOT_DH_DEV_LAKE_ROOT,   value: "{{workflow.parameters.lake_root}}"}
+          - {name: ROBOT_DH_INPUT_CACHE_DIR, value: "{{workflow.parameters.input_cache_dir}}"}
+          - {name: PYTHONUNBUFFERED,         value: "1"}
+        envFrom:
+          - configMapRef: {name: robot-dh-local-runtime, optional: true}
+        volumeMounts:
+          - {name: local-data, mountPath: /mnt/local-data/robot-dh-local}
+          - {name: tmp,        mountPath: /tmp}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 500m, memory: 1Gi}
+          limits:   {cpu: 2,    memory: 4Gi}
+      activeDeadlineSeconds: 3600
+      retryStrategy:
+        limit: 1
+        retryPolicy: "Always"
+
+    - name: build-ads
+      podSpecPatch: |
+        terminationGracePeriodSeconds: 30
+      volumes:
+        - name: local-data
+          persistentVolumeClaim:
+            claimName: robot-dh-local-data-pvc
+        - name: tmp
+          emptyDir: {sizeLimit: 1Gi}
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -o pipefail
+            python -u -m robot_dh.cli build-ads \
+              --input-root "{{workflow.parameters.lake_root}}/dwd" \
+              --output "{{workflow.parameters.lake_root}}/ads/quality" \
+              --log-format json 2>&1 | tee /tmp/build-ads.log
+        env:
+          - {name: ROBOT_DH_LOCAL_DATA_ROOT, value: "{{workflow.parameters.local_data_root}}"}
+          - {name: PYTHONUNBUFFERED,         value: "1"}
+        envFrom:
+          - configMapRef: {name: robot-dh-local-runtime, optional: true}
+        volumeMounts:
+          - {name: local-data, mountPath: /mnt/local-data/robot-dh-local}
+          - {name: tmp,        mountPath: /tmp}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 500m, memory: 1Gi}
+          limits:   {cpu: 2,    memory: 4Gi}
+      activeDeadlineSeconds: 1800
+      retryStrategy:
+        limit: 1
+        retryPolicy: "Always"
+
+    - name: ml-ready-export
+      podSpecPatch: |
+        terminationGracePeriodSeconds: 30
+      volumes:
+        - name: local-data
+          persistentVolumeClaim:
+            claimName: robot-dh-local-data-pvc
+        - name: tmp
+          emptyDir: {sizeLimit: 1Gi}
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -o pipefail
+            python -u -m robot_dh.cli ml-ready export \
+              --input-root   "{{workflow.parameters.lake_root}}/dwd" \
+              --quality-root "{{workflow.parameters.lake_root}}/ads/quality" \
+              --qc-root      "{{workflow.parameters.lake_root}}/qc" \
+              --output       "{{workflow.parameters.lake_root}}/ml-ready/devscale/{{workflow.parameters.version}}" \
+              --dataset-id   "devscale" \
+              --version      "{{workflow.parameters.version}}" \
+              --quality-threshold "{{workflow.parameters.quality_threshold}}" \
+              --split 0.8,0.1,0.1 \
+              --log-format json 2>&1 | tee /tmp/ml-ready.log
+        env:
+          - {name: ROBOT_DH_LOCAL_DATA_ROOT, value: "{{workflow.parameters.local_data_root}}"}
+          - {name: PYTHONUNBUFFERED,         value: "1"}
+        envFrom:
+          - configMapRef: {name: robot-dh-local-runtime, optional: true}
+        volumeMounts:
+          - {name: local-data, mountPath: /mnt/local-data/robot-dh-local}
+          - {name: tmp,        mountPath: /tmp}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 500m, memory: 1Gi}
+          limits:   {cpu: 2,    memory: 4Gi}
+      activeDeadlineSeconds: 1800
+      retryStrategy:
+        limit: 1
+        retryPolicy: "Always"
+
+    - name: benchmark-regression
+      podSpecPatch: |
+        terminationGracePeriodSeconds: 30
+      volumes:
+        - name: local-data
+          persistentVolumeClaim:
+            claimName: robot-dh-local-data-pvc
+        - name: tmp
+          emptyDir: {sizeLimit: 512Mi}
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -o pipefail
+            python -u -m robot_dh.cli benchmark run \
+              --suite configs/benchmark_suite.yaml \
+              --output "{{workflow.parameters.lake_root}}/benchmark/{{workflow.name}}" \
+              --log-format json 2>&1 | tee /tmp/benchmark.log
+        env:
+          - {name: ROBOT_DH_LOCAL_DATA_ROOT, value: "{{workflow.parameters.local_data_root}}"}
+          - {name: PYTHONUNBUFFERED,         value: "1"}
+        envFrom:
+          - configMapRef: {name: robot-dh-local-runtime, optional: true}
+        volumeMounts:
+          - {name: local-data, mountPath: /mnt/local-data/robot-dh-local}
+          - {name: tmp,        mountPath: /tmp}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 500m, memory: 1Gi}
+          limits:   {cpu: 2,    memory: 4Gi}
+      activeDeadlineSeconds: 1800
+      # benchmark 不重试：失败原因通常是 suite 配置问题，重跑也是失败
+      retryStrategy:
+        limit: 0
+
+    - name: publish-lineage
+      podSpecPatch: |
+        terminationGracePeriodSeconds: 30
+      volumes:
+        - name: local-data
+          persistentVolumeClaim:
+            claimName: robot-dh-local-data-pvc
+        - name: tmp
+          emptyDir: {sizeLimit: 256Mi}
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -o pipefail
+            python -u -m robot_dh.cli lineage report \
+              --workflow-name "{{workflow.name}}" \
+              --namespace "{{workflow.namespace}}" \
+              --output "{{workflow.parameters.lake_root}}/lineage/reports/{{workflow.name}}.json" \
+              --log-format json 2>&1 | tee /tmp/lineage.log
+        env:
+          - {name: ROBOT_DH_LOCAL_DATA_ROOT, value: "{{workflow.parameters.local_data_root}}"}
+          - {name: PYTHONUNBUFFERED,         value: "1"}
+        envFrom:
+          - configMapRef: {name: robot-dh-local-runtime, optional: true}
+        volumeMounts:
+          - {name: local-data, mountPath: /mnt/local-data/robot-dh-local}
+          - {name: tmp,        mountPath: /tmp}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 250m, memory: 512Mi}
+          limits:   {cpu: 1,    memory: 2Gi}
+      activeDeadlineSeconds: 600
+      retryStrategy:
+        limit: 1
+        retryPolicy: "Always"
+
+    - name: argo-sync
+      podSpecPatch: |
+        terminationGracePeriodSeconds: 30
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 256Mi}
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -o pipefail
+            python -u -m robot_dh.cli argo sync \
+              --workflow-name "{{workflow.name}}" \
+              --namespace "{{workflow.namespace}}" \
+              --log-format json 2>&1 | tee /tmp/argo-sync.log
+        env:
+          - {name: PYTHONUNBUFFERED, value: "1"}
+        envFrom:
+          - configMapRef: {name: robot-dh-local-runtime, optional: true}
+        volumeMounts:
+          - {name: tmp, mountPath: /tmp}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 250m, memory: 256Mi}
+          limits:   {cpu: 1,    memory: 1Gi}
+      activeDeadlineSeconds: 600
+
+    - name: archive-logs-index
+      podSpecPatch: |
+        terminationGracePeriodSeconds: 30
+      volumes:
+        - name: local-data
+          persistentVolumeClaim:
+            claimName: robot-dh-local-data-pvc
+        - name: tmp
+          emptyDir: {sizeLimit: 256Mi}
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -o pipefail
+            python -u -m robot_dh.cli argo logs index \
+              --workflow-name "{{workflow.name}}" \
+              --namespace "{{workflow.namespace}}" \
+              --archive-root "{{workflow.parameters.archive_root}}" \
+              --log-format json 2>&1 | tee /tmp/archive-logs-index.log
+        env:
+          - {name: ROBOT_DH_LOCAL_DATA_ROOT, value: "{{workflow.parameters.local_data_root}}"}
+          - {name: PYTHONUNBUFFERED,         value: "1"}
+        envFrom:
+          - configMapRef: {name: robot-dh-local-runtime, optional: true}
+        volumeMounts:
+          - {name: local-data, mountPath: /mnt/local-data/robot-dh-local}
+          - {name: tmp,        mountPath: /tmp}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 250m, memory: 256Mi}
+          limits:   {cpu: 1,    memory: 1Gi}
+      activeDeadlineSeconds: 600

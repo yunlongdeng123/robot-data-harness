@@ -34,9 +34,26 @@ RUN apt-get update \
         libgl1 \
         libsm6 \
         libxext6 \
+        ca-certificates \
+        curl \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /tmp/.matplotlib /tmp/.cache /tmp/.config /tmp/.cache/fontconfig /tmp/robot-dh/events \
     && chmod -R 1777 /tmp/.matplotlib /tmp/.cache /tmp/.config /tmp/robot-dh
+
+# v1.7 local Argo workflow 的 argo-sync / archive-logs-index step 在 pod 内调用
+# `kubectl get workflow ... -o json` 拉 workflow JSON 写回 PG。固定到稳定 minor
+# 版本（v1.30，含 client-side prune），通过 K8s 官方 mirror 拉对应架构的二进制。
+ARG KUBECTL_VERSION=v1.30.4
+RUN set -eux; \
+    case "$(uname -m)" in \
+        x86_64) arch="amd64" ;; \
+        aarch64) arch="arm64" ;; \
+        *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /usr/local/bin/kubectl \
+        "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${arch}/kubectl"; \
+    chmod 0755 /usr/local/bin/kubectl; \
+    /usr/local/bin/kubectl version --client=true --output=yaml | head -10
 
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir \

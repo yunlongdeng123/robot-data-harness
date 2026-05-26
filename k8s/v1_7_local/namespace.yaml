@@ -1,0 +1,11 @@
+# v1.7 Local-First Data Runtime - namespace
+#
+# 复用 robot-dh namespace 以与 v1.6 Argo workflow 共存；
+# 仅在该 namespace 里追加 PV/PVC/ConfigMap/Pod。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: robot-dh
+  labels:
+    app: robot-dh
+    component: local-data-runtime

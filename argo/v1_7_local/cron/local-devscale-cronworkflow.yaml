@@ -1,0 +1,23 @@
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: robot-dh-local-devscale-nightly
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: v1-7-local
+    role: devscale-main-cron
+  annotations:
+    robot-dh.io/scope: "devscale"
+    robot-dh.io/data-source: "local-pvc"
+spec:
+  schedule: "30 2 * * *"   # 本地凌晨 2:30 跑一遍 devscale 回归（无远端依赖）
+  timezone: "Asia/Shanghai"
+  concurrencyPolicy: "Forbid"
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  suspend: false
+  workflowSpec:
+    workflowTemplateRef:
+      name: robot-dh-local-devscale

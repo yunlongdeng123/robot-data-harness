@@ -140,7 +140,14 @@ def _materialize_input(
             progress_log_every=50,
         )
         return local
-    return Path(parsed.local_path).expanduser().resolve()
+    # v1.7：本地 file:// / 裸路径直接作为 input root，**不复制**整目录到 tmp。
+    # 关键日志：v1.7 验收硬性要求 normalize 在本地路径下打出明确字样。
+    resolved = Path(parsed.local_path).expanduser().resolve()
+    LOG.info(
+        "materialize_input: using local direct input, no download (dataset_uri=%s root=%s)",
+        dataset_uri, resolved,
+    )
+    return resolved
 
 
 def _materialize_exclude_prefixes(dataset_uri: str) -> tuple[str, ...] | None:

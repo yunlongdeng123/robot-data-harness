@@ -145,6 +145,9 @@ def _probe_hdf5_uri(uri: str, tmp: Path) -> dict[str, Any]:
     避免默认档 300s × 10 把单文件单次 download 拖到 50min；并发 ~4 个 worker
     在 1800s step deadline 内能稳跑完 26 文件。
     """
+    # v1.7：本地 file:// URI 时 ``_materialize_local`` 直接返回原 path，
+    # 此时不能 unlink，否则 probe 会把 raw 数据本身删掉。仅 S3 下需要清理 tmp 副本。
+    owns_local = is_s3_uri(uri)
     try:
         local = _materialize_local(uri, tmp / "hdf5", fast=True)
     except Exception as err:  # noqa: BLE001
@@ -152,24 +155,27 @@ def _probe_hdf5_uri(uri: str, tmp: Path) -> dict[str, Any]:
     out = probe_hdf5(local)
     out["uri"] = uri
     # 即下即删，控制 /tmp 占用：26 × 1.1 GiB 高峰只剩 4 路并发 × 1 个 = 4.4 GiB。
-    try:
-        local.unlink(missing_ok=True)
-    except OSError:
-        pass
+    if owns_local:
+        try:
+            local.unlink(missing_ok=True)
+        except OSError:
+            pass
     return out
 
 
 def _probe_video_uri(uri: str, tmp: Path) -> dict[str, Any]:
+    owns_local = is_s3_uri(uri)
     try:
         local = _materialize_local(uri, tmp / "mp4", fast=True)
     except Exception as err:  # noqa: BLE001
         return {"uri": uri, "readable": False, **_summarize_exception(err)}
     out = probe_video(local)
     out["uri"] = uri
-    try:
-        local.unlink(missing_ok=True)
-    except OSError:
-        pass
+    if owns_local:
+        try:
+            local.unlink(missing_ok=True)
+        except OSError:
+            pass
     return out
 
 

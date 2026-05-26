@@ -1,0 +1,52 @@
+# v1.7 Local-First Robot Data Platform Runtime - 运行时配置。
+#
+# 用于 robot-dh local runtime doctor / robot-dh adapter * / qc contract run /
+# etl run 等命令，把"本地路径"与"容灾参数"集中到一处，避免散在 env / CLI。
+#
+# 路径层级回顾：
+#   WSL host      : /mnt/d/robot-dh-local
+#   kind / pod    : /mnt/local-data/robot-dh-local
+# 该文件描述**容器内**（即 kind node / pod 看到的）路径；
+# 如果在 WSL host 直接跑 CLI，可用环境变量 ROBOT_DH_LOCAL_DATA_ROOT 覆盖。
+
+version: 1
+
+runtime:
+  host_data_root: /mnt/d/robot-dh-local
+  k8s_data_root: /mnt/local-data/robot-dh-local
+  raw_subdir: raw
+  lake_subdir: lake
+  cache_subdir: cache
+  workdir_subdir: cache/argo-workdir
+  manifests_subdir: manifests
+  logs_subdir: logs
+
+# devscale 上限；超过即 fail（除非 --allow-over-limit）。
+limits:
+  devscale_total_max_bytes: 3000000000
+  devscale_total_max_files: 5000
+
+# 默认 dev 数据集 id；与 configs/devscale_datasets.yaml 一致。
+devscale_datasets:
+  - droid_lerobot_dev1g
+  - robomimic_dev1g
+  - bridgedata_v2_dev
+
+# QC / probe 容灾默认值；可被 CLI flag 覆盖。
+qc:
+  bridge:
+    probe_timeout_sec: 120
+    max_retries: 2
+    disable_remote_lazy: false
+  robomimic:
+    max_workers: 4
+    file_timeout_sec: 300
+    fail_fast: false
+  droid:
+    skip_videos_normalize: true
+    video_metadata_only: true
+
+# heartbeat stale 判定。
+heartbeat:
+  stale_after_sec: 300
+  warn_after_sec: 120

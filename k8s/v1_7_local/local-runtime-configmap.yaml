@@ -1,0 +1,23 @@
+# v1.7 Local-First Data Runtime - ConfigMap
+#
+# 供 Argo workflow / 调试 Pod 引用，统一 dev 路径口径。
+# 真实凭据 (S3 AK/SK / DB URI) 仍走 robot-dh-v1-6-secrets，不在此处。
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: robot-dh-local-runtime
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: local-data-runtime
+data:
+  ROBOT_DH_LOCAL_DATA_ROOT: "/mnt/local-data/robot-dh-local"
+  ROBOT_DH_DEV_DATA_ROOT: "file:///mnt/local-data/robot-dh-local/raw"
+  ROBOT_DH_DEV_LAKE_ROOT: "file:///mnt/local-data/robot-dh-local/lake"
+  ROBOT_DH_INPUT_CACHE_DIR: "/mnt/local-data/robot-dh-local/cache/input-cache"
+  ROBOT_DH_ARGO_WORKDIR: "/mnt/local-data/robot-dh-local/cache/argo-workdir"
+  # 与 v1.6 normalize cache 路径一致；让 hostPath 也能命中 input-cache。
+  ROBOT_DH_NORMALIZE_INPUT_CACHE_HINT: "host_mounted"
+  # devscale 默认 dataset id 列表，调试时手动覆盖。
+  ROBOT_DH_DEVSCALE_DATASETS: "droid_lerobot_dev1g,robomimic_dev1g,bridgedata_v2_dev"

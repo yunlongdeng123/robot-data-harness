@@ -1,0 +1,69 @@
+# v1.7 Local-First Data Runtime - devscale dataset 清单
+#
+# 用途：声明本地 D 盘 (D:\robot-dh-local) 上的 devscale 镜像数据集，
+#       供 scripts/local_plan_devscale_sync.sh / local_sync_devscale.sh /
+#       local_verify_devscale.sh 消费。
+#
+# 设计约束（强制）：
+#   1. 三类家族（droid / robomimic / bridge）总量 <= 3 GB，不允许覆盖。
+#      想要更大尺寸请走 scale30 远端 workflow（手动压测路径），
+#      不要在这里偷偷加 dataset。
+#   2. source_uri 一律 s3:// 开头，由 mc alias robotdh-remote 解析。
+#   3. target_local_uri 一律 file:///mnt/d/robot-dh-local/raw/... 开头；
+#      若用户用 --root 覆盖 ROBOT_DH_LOCAL_DATA_ROOT，脚本会替换路径前缀。
+#   4. include 优先于 exclude；mc cp / mirror 失败时 verify 给 WARN 而非
+#      静默成功。
+#   5. 不删除已有数据（除非用户显式 --force-clean 二次确认）。
+
+version: 1
+total_max_bytes: 3000000000        # 3 GB 硬上限
+default_concurrency: 4
+default_retries: 3
+
+datasets:
+  - dataset_id: droid_lerobot_dev1g
+    family: droid
+    version: v1
+    source_uri: s3://robot-datasets/raw/droid_lerobot_scale30/v1
+    target_local_uri: file:///mnt/d/robot-dh-local/raw/droid_lerobot_dev1g/v1
+    max_bytes: 1200000000           # ~1.2 GB
+    # 只取 meta + 单 parquet shard + 单一视图视频；其它视图全部排除。
+    include:
+      - meta/**
+      - data/chunk-000/file-000.parquet
+      - videos/observation.images.exterior_1_left/chunk-000/file-000.mp4
+    exclude:
+      - videos/observation.images.exterior_2_left/**
+      - videos/observation.images.wrist_left/**
+
+  - dataset_id: robomimic_dev1g
+    family: robomimic
+    version: v1
+    source_uri: s3://robot-datasets/raw/robomimic_scale30/v1
+    target_local_uri: file:///mnt/d/robot-dh-local/raw/robomimic_dev1g/v1
+    max_bytes: 900000000            # ~0.9 GB
+    # robomimic 单文件 HDF5 较大，只取 low_dim*v15 中的「普通版」前 3 个；
+    # dense / sparse 变体在 v1.5 数据集里单文件就 ~1 GiB，远超本地 cap，
+    # 一旦命中第 1 个就会触发 max_bytes 截断 → selected=0 / manifest=empty。
+    include:
+      - "**/low_dim*.hdf5"
+    exclude:
+      - "**/image*.hdf5"
+      - "**/depth*.hdf5"
+      - "**/low_dim_dense*.hdf5"
+      - "**/low_dim_sparse*.hdf5"
+    max_files: 3
+
+  - dataset_id: bridgedata_v2_dev
+    family: bridge
+    version: v1
+    source_uri: s3://robot-datasets/raw/bridgedata_v2_scale30/v1
+    target_local_uri: file:///mnt/d/robot-dh-local/raw/bridgedata_v2_dev/v1
+    max_bytes: 400000000            # ~0.4 GB
+    # bridgedata_v2 单 parquet 含 image bytes，~50 MB / shard；
+    # 取前 10 个，加 meta + README 文本。
+    include:
+      - "data/*.parquet"
+      - "README*"
+      - "meta/**"
+    max_files: 10

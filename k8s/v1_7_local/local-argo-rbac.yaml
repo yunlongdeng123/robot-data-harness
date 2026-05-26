@@ -1,0 +1,40 @@
+# v1.7 Local Argo RBAC：扩展 v1.5/v1.6 已有的 robot-dh-workflow Role，
+# 允许 step pod 读 robot-dh-local-runtime ConfigMap 和（可选）secret。
+# 不重新定义 ServiceAccount / RoleBinding —— 复用 k8s/v1_5_argo/。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: robot-dh-workflow-v1-7-local
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: v1-7-local
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["robot-dh-local-runtime", "robot-dh-v1-5-config", "robot-dh-v1-6-config"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["robot-dh-local-secrets"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: robot-dh-workflow-v1-7-local
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: v1-7-local
+subjects:
+  - kind: ServiceAccount
+    name: robot-dh-workflow
+    namespace: robot-dh
+roleRef:
+  kind: Role
+  name: robot-dh-workflow-v1-7-local
+  apiGroup: rbac.authorization.k8s.io

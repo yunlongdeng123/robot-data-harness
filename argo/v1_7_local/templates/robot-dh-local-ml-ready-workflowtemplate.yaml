@@ -1,0 +1,134 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: robot-dh-local-ml-ready
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: v1-7-local
+    role: devscale-ml-ready
+spec:
+  serviceAccountName: robot-dh-workflow
+  entrypoint: main
+  ttlStrategy:
+    secondsAfterCompletion: 86400
+  podGC:
+    strategy: OnWorkflowCompletion
+  activeDeadlineSeconds: 1800
+  podSpecPatch: |
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      fsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+  arguments:
+    parameters:
+      - {name: local_data_root, value: "/mnt/local-data/robot-dh-local"}
+      - {name: lake_root,       value: "file:///mnt/local-data/robot-dh-local/lake"}
+      - {name: version,         value: "v1"}
+      - {name: quality_threshold, value: "80"}
+  templates:
+    - name: main
+      dag:
+        tasks:
+          - name: build-ads
+            template: build-ads
+          - name: ml-ready-export
+            depends: "build-ads"
+            template: ml-ready-export
+
+    - name: build-ads
+      podSpecPatch: |
+        terminationGracePeriodSeconds: 30
+      volumes:
+        - name: local-data
+          persistentVolumeClaim:
+            claimName: robot-dh-local-data-pvc
+        - name: tmp
+          emptyDir: {sizeLimit: 1Gi}
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -o pipefail
+            python -u -m robot_dh.cli build-ads \
+              --input-root "{{workflow.parameters.lake_root}}/dwd" \
+              --output "{{workflow.parameters.lake_root}}/ads/quality" \
+              --log-format json 2>&1 | tee /tmp/build-ads.log
+        env:
+          - {name: ROBOT_DH_LOCAL_DATA_ROOT, value: "{{workflow.parameters.local_data_root}}"}
+          - {name: PYTHONUNBUFFERED,         value: "1"}
+        envFrom:
+          - configMapRef: {name: robot-dh-local-runtime, optional: true}
+        volumeMounts:
+          - {name: local-data, mountPath: /mnt/local-data/robot-dh-local}
+          - {name: tmp,        mountPath: /tmp}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 500m, memory: 1Gi}
+          limits:   {cpu: 2,    memory: 4Gi}
+      activeDeadlineSeconds: 1800
+      retryStrategy:
+        limit: 1
+        retryPolicy: "Always"
+
+    - name: ml-ready-export
+      podSpecPatch: |
+        terminationGracePeriodSeconds: 30
+      volumes:
+        - name: local-data
+          persistentVolumeClaim:
+            claimName: robot-dh-local-data-pvc
+        - name: tmp
+          emptyDir: {sizeLimit: 1Gi}
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -o pipefail
+            python -u -m robot_dh.cli ml-ready export \
+              --input-root   "{{workflow.parameters.lake_root}}/dwd" \
+              --quality-root "{{workflow.parameters.lake_root}}/ads/quality" \
+              --qc-root      "{{workflow.parameters.lake_root}}/qc" \
+              --output       "{{workflow.parameters.lake_root}}/ml-ready/devscale/{{workflow.parameters.version}}" \
+              --dataset-id   "devscale" \
+              --version      "{{workflow.parameters.version}}" \
+              --quality-threshold "{{workflow.parameters.quality_threshold}}" \
+              --split 0.8,0.1,0.1 \
+              --log-format json 2>&1 | tee /tmp/ml-ready.log
+        env:
+          - {name: ROBOT_DH_LOCAL_DATA_ROOT, value: "{{workflow.parameters.local_data_root}}"}
+          - {name: PYTHONUNBUFFERED,         value: "1"}
+        envFrom:
+          - configMapRef: {name: robot-dh-local-runtime, optional: true}
+        volumeMounts:
+          - {name: local-data, mountPath: /mnt/local-data/robot-dh-local}
+          - {name: tmp,        mountPath: /tmp}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 500m, memory: 1Gi}
+          limits:   {cpu: 2,    memory: 4Gi}
+      activeDeadlineSeconds: 1800
+      retryStrategy:
+        limit: 1
+        retryPolicy: "Always"

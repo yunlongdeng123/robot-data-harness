@@ -1,0 +1,41 @@
+# v1.7 Local-First Data Runtime - debug pod
+#
+# 用途：
+#   kubectl -n robot-dh exec -it robot-dh-local-debug -- ls -lh /mnt/local-data/robot-dh-local/raw
+#
+# 与现有 robot-dh-debug 共存；本 Pod 走 robot-dh-local-data-pvc。
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: robot-dh-local-debug
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: local-data-runtime
+spec:
+  restartPolicy: Always
+  containers:
+    - name: debug
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - "sleep infinity"
+      envFrom:
+        - configMapRef:
+            name: robot-dh-local-runtime
+      volumeMounts:
+        - name: local-data
+          mountPath: /mnt/local-data/robot-dh-local
+      resources:
+        requests:
+          cpu: "10m"
+          memory: "16Mi"
+        limits:
+          cpu: "200m"
+          memory: "128Mi"
+  volumes:
+    - name: local-data
+      persistentVolumeClaim:
+        claimName: robot-dh-local-data-pvc

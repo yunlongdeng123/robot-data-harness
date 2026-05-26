@@ -1,0 +1,23 @@
+# v1.7 Local Argo ConfigMap：把 workflow.parameters 的默认值集中放一份，
+# 便于"集群级"调参（quality_threshold / max_workers / heartbeat_interval_sec）。
+# WorkflowTemplate 已经写了相同默认值（spec.arguments.parameters），本 CM 主要
+# 给调试 Pod / make argo-local-* 脚本读取使用，**不**直接 envFrom 到 step pod
+# （那样会越过 workflow.parameters 显得变量来源混乱）。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: robot-dh-local-argo
+  namespace: robot-dh
+  labels:
+    app: robot-dh
+    component: v1-7-local
+data:
+  WF_DROID_DATASET_ID: "droid_lerobot_dev1g"
+  WF_ROBOMIMIC_DATASET_ID: "robomimic_dev1g"
+  WF_BRIDGE_DATASET_ID: "bridgedata_v2_dev"
+  WF_VERSION: "v1"
+  WF_QUALITY_THRESHOLD: "80"
+  WF_MAX_WORKERS: "4"
+  WF_HEARTBEAT_INTERVAL_SEC: "30"
+  WF_FAIL_ON_CONTRACT_FAIL: "false"
+  WF_ARCHIVE_ROOT: "file:///mnt/local-data/robot-dh-local/lake/argo-logs"

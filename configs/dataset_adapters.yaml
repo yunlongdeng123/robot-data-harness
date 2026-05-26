@@ -1,0 +1,87 @@
+# v1.7 - dataset adapter registry。
+#
+# 在不重写 v1.6 hf_adapters 的前提下，给 v1.7 RobotDatasetAdapter 注册表提供一份
+# 数据驱动的"如何识别 / 路由 / 推荐参数"清单。`robot-dh adapter detect` 会按
+# 顺序匹配（更具体的 dataset_id_prefixes 优先于通用 layout markers）。
+
+version: 1
+
+adapters:
+  # ----- DROID / LeRobot v2 -----
+  - family: droid
+    detector: droid_lerobot
+    layout_markers:
+      required_any:
+        - meta/info.json
+      optional:
+        - meta/episodes.jsonl
+        - meta/stats.json
+    dataset_id_prefixes:
+      - droid_lerobot
+      - lerobot/droid
+    parquet_glob: "data/chunk-*/file-*.parquet"
+    video_glob: "videos/**/*.mp4"
+    # normalize 默认跳过视频。
+    normalize_options:
+      skip_videos: true
+      include_prefixes: ["data/", "meta/"]
+    qc_options:
+      probe_videos: false
+
+  # ----- robomimic -----
+  - family: robomimic
+    detector: robomimic_hdf5
+    layout_markers:
+      required_any:
+        - "**/*.hdf5"
+    dataset_id_prefixes:
+      - robomimic
+    hdf5_glob: "**/*.hdf5"
+    normalize_options:
+      direct_h5py_read: true     # 本地 file URI 下不复制
+    qc_options:
+      max_workers: 4
+      file_timeout_sec: 300
+      fail_fast: false
+
+  # ----- BridgeData V2 -----
+  - family: bridge
+    detector: bridge_parquet
+    layout_markers:
+      required_any:
+        - "data/*.parquet"
+    dataset_id_prefixes:
+      - bridgedata_v2
+      - bridge_v2
+      - bridge
+    parquet_glob: "data/*.parquet"
+    column_hints:
+      action:
+        - action
+        - actions
+        - action.pose
+      state:
+        - state
+        - state.end_effector_pose
+        - observation.state
+      image:
+        - image
+        - observation.image
+        - rgb
+      language:
+        - language
+        - language_instruction
+        - state.language_embedding
+    normalize_options:
+      direct_parquet_read: true
+    qc_options:
+      probe_timeout_sec: 120
+      max_retries: 2
+      disable_remote_lazy: false
+
+  # ----- universal fallback -----
+  - family: universal
+    detector: universal
+    layout_markers: {}
+    normalize_options: {}
+    qc_options: {}

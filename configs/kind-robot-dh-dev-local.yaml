@@ -1,0 +1,37 @@
+# v1.7 Local-First Data Runtime - kind cluster config
+#
+# 创建脚本：scripts/local_create_kind_with_d_mount.sh
+# 重要约束：
+#   1. 仅本机 dev 用。不要拷到云端 K8s。
+#   2. extraMounts.hostPath 必须是 /mnt/d/robot-dh-local（默认）或
+#      用户在 ROBOT_DH_LOCAL_DATA_ROOT 显式 override 的 WSL 路径；
+#      不允许使用 /mnt/c 或 WSL ext4 VHDX 路径（避免占用 C 盘 / WSL VHDX）。
+#   3. containerPath 与 k8s/v1_7_local/local-data-pv-pvc.yaml.hostPath
+#      保持完全一致：/mnt/local-data/robot-dh-local。
+#   4. extraPortMappings 与现有 robot-dh 集群共存：本配置只用于
+#      robot-dh-dev cluster，端口冲突时由 local_create_kind_with_d_mount.sh
+#      在 preflight 中检测。
+#
+# WSL <-> kind node <-> pod 路径映射：
+#   WSL / Windows:    D:\robot-dh-local             == /mnt/d/robot-dh-local
+#   kind node 内部:   /mnt/local-data/robot-dh-local
+#   Pod 内挂载点:     /mnt/local-data/robot-dh-local（与 node 同）
+
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: robot-dh-dev
+nodes:
+  - role: control-plane
+    extraMounts:
+      - hostPath: /mnt/d/robot-dh-local
+        containerPath: /mnt/local-data/robot-dh-local
+    extraPortMappings:
+      - containerPort: 30080
+        hostPort: 8080
+        protocol: TCP
+      - containerPort: 30081
+        hostPort: 9001
+        protocol: TCP
+      - containerPort: 32746
+        hostPort: 2746
+        protocol: TCP
