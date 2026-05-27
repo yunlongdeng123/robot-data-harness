@@ -84,58 +84,9 @@ CLI + FastAPI 只读端点：`quality summary/report`、`sla check/report`、`ba
 
 ## 架构总览
 
-```mermaid
-flowchart LR
-    classDef src      fill:#eef6ff,stroke:#4f8bd1,color:#1f3a5f
-    classDef qc       fill:#fff4e8,stroke:#d98a3b,color:#5a3210
-    classDef etl      fill:#eaf7ef,stroke:#3f9d65,color:#1c4d33
-    classDef wh       fill:#f3ecff,stroke:#7a55d1,color:#34195f
-    classDef rt       fill:#fdecec,stroke:#c9504f,color:#5a1a1a
-
-    subgraph SRC["数据源 (Datasets)"]
-        D1["DROID / LeRobot v2"]
-        D2["robomimic / HDF5"]
-        D3["BridgeData V2"]
-        D4["自有 eexyzxyzw"]
-    end
-    class D1,D2,D3,D4 src
-
-    subgraph QC["QC Contract Layer"]
-        Q1["Adapter Registry<br/>droid · robomimic · bridge · universal"]
-        Q2["Probes<br/>parquet / hdf5 / video"]
-        Q3["Contract Rules<br/>schema · temporal · video"]
-    end
-    class Q1,Q2,Q3 qc
-
-    subgraph ETL["数据湖 ETL (ODS → DWD → ADS)"]
-        E1["normalize<br/>endpose / fps / quat<br/>partition · heartbeat · resume"]
-        E2["build_features"]
-        E3["build_ads / ml-ready export"]
-    end
-    class E1,E2,E3 etl
-
-    subgraph WH["Warehouse (v1.8) · PostgreSQL / SQLite"]
-        W1["DIM 4 · FACT 4"]
-        W2["DWS 3 · ADS 3"]
-        W3["quality_ops<br/>sla · backfill"]
-    end
-    class W1,W2,W3 wh
-
-    subgraph RT["运行时 / 编排 / 观测"]
-        R1["FastAPI 控制面"]
-        R2["Argo Workflows<br/>kind · K8s"]
-        R3["Go Exporter<br/>Prometheus"]
-        R4["Spark Local Mode<br/>parquet 宽表"]
-    end
-    class R1,R2,R3,R4 rt
-
-    SRC --> QC --> ETL --> WH
-    WH --> R1
-    WH --> R3
-    WH --> R4
-    R2 -. 调度 .-> QC
-    R2 -. 调度 .-> ETL
-```
+<p align="center">
+  <img src="docs/images/overview.png" alt="robot-data-harness 架构总览" width="900">
+</p>
 
 <details>
 <summary><b>分层职责说明</b></summary>
