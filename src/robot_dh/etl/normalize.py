@@ -53,7 +53,7 @@ from robot_dh.lake.schema import (
 from robot_dh.lake.store import LakeStore, create_lake_store
 from robot_dh.lake.uri import is_s3_uri, join_uri, parse_uri
 from robot_dh.perf.profiler import EtlProfiler
-from robot_dh.perf.writer import emit_perf_records
+from robot_dh.perf.writer import write_perf_json
 from robot_dh.progress.checkpoint import (
     CHECKPOINT_FILENAME,
     Checkpoint,
@@ -98,6 +98,10 @@ class NormalizeResult:
     files: list[dict[str, Any]] = field(default_factory=list)
     status: str = "OK"  # OK / SKIPPED / RESUMED
     completed_steps: list[str] = field(default_factory=list)
+    # v1.8 修复：携带 sub-stage profiler 采集的精细 metrics
+    # （materialize / load / build / upload / manifest），由 cli 上层 perf_records_from_etl_run
+    # 合并到 PerfRecord.metrics，保证单点写 PG，不再让 normalize 内部直接写库制造 RUNNING 孤儿。
+    metrics: dict[str, Any] = field(default_factory=dict)
 
 
 def _materialize_input(
@@ -547,13 +551,22 @@ def collect_outputs_to_files(store: LakeStore, output_uri: str) -> list[dict[str
 
 
 def _emit_normalize_perf(prof: EtlProfiler, perf_dir: Path | None) -> Path | None:
-    """v1.6 normalize 子阶段 perf 落盘到 perf_dir/normalize_perf.json。"""
+    """v1.6 normalize 子阶段 perf 只落本地 JSON；不再直接写 PG。
+
+    v1.8 修复：之前用 ``emit_perf_records`` 既写 JSON 又写 PG，加上调用点位于
+    ``with EtlProfiler`` 块**内部**，导致写库时 ``prof.record.status`` 还停在
+    初始的 ``"RUNNING"``、``finished_at=""``、``duration_sec=0``——一条永远不会
+    收尾的孤儿。同一次 normalize 又被 cli 上层 ``perf_records_from_etl_run``
+    写一条 OK 终态，PG 里出现 RUNNING + OK 双行，``etl_success_rate`` 被错算成
+    50%/60%。这里只走 ``write_perf_json``（纯 JSON），让 PG 的单点写库由 cli
+    上层 ``emit_perf_records`` 负责，且调用时机已经在 ``EtlProfiler.__exit__``
+    之后，status / finished_at / duration_sec 都正确。
+    """
     if perf_dir is None:
         return None
     perf_dir = perf_dir.expanduser().resolve()
     perf_dir.mkdir(parents=True, exist_ok=True)
-    emit_perf_records([prof.record], work_dir=perf_dir)
-    return perf_dir / "normalize_perf.json"
+    return write_perf_json(prof.record, perf_dir)
 
 
 def normalize_dataset(
@@ -901,9 +914,12 @@ def normalize_dataset(
                 }
                 warehouse.record_etl_job_finish(job_id=job_id, status="OK", metrics=metrics)
 
-                _emit_normalize_perf(prof, perf_dir)
-
-                return NormalizeResult(
+                # v1.8 修复：先把 result 攒着，**不要**在 with 块内 emit perf 到 PG。
+                # EtlProfiler.__exit__ 还没跑，status/finished_at/duration 都是初始值。
+                # 这里只快照 sub-stage metrics（s3_upload_bytes / manifest_duration_sec 等），
+                # PG 的写入由 cli 上层 perf_records_from_etl_run 在 normalize 真正
+                # 收尾后统一处理。
+                result = NormalizeResult(
                     dataset_id=ds_id,
                     version=ver,
                     episode_id=ep_id,
@@ -920,7 +936,13 @@ def normalize_dataset(
                     files=files,
                     status="OK",
                     completed_steps=list(ckpt.completed_steps),
+                    metrics=dict(prof.record.metrics),
                 )
+        # ↑ 走到这里 tempdir + heartbeat + EtlProfiler 都已经 __exit__：
+        # prof.record.status == "OK"、finished_at 已设、duration_sec 已算。
+        # 这时落 normalize_perf.json 才是"成品"状态。
+        _emit_normalize_perf(prof, perf_dir)
+        return result
     except Exception as err:
         warehouse.record_etl_job_finish(job_id=job_id, status="FAIL", error_message=str(err))
         raise

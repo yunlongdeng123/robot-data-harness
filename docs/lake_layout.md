@@ -143,4 +143,4 @@ PostgreSQL 应用账号 `robot_dh_app` 的库级 / schema 级权限由 v1.3 已�
 | `scripts/23_minio_lake_smoke_test.sh` | 用应用 access key 在 `tmp/` 下写入再删除一个 smoke 对象，确认 lake policy 生效 |
 | `scripts/24_export_lake_client_env.sh` | 渲染 lake 版客户端 env（脱敏默认，需 `--show-secrets` 写真实文件） |
 
-更多操作步骤见 `docs/v1_4_infra_runbook.md`。
+更多操作步骤见 `docs/history/v1_4_infra_runbook.md`。

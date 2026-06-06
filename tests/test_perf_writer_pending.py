@@ -1,6 +1,6 @@
 """F2 软降级 + reingest 行为覆盖：模拟 etl_perf_runs schema 漂移场景。
 
-具体场景出自 ``docs/v1_6_etl_perf_runs_schema_align_request.md`` §4.2 推荐方案 A。
+具体场景出自 ``docs/history/v1_6_etl_perf_runs_schema_align_request.md`` §4.2 推荐方案 A。
 """
 
 from __future__ import annotations

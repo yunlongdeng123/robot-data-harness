@@ -1,0 +1,55 @@
+# v1.8 SLA 策略集合。
+#
+# 字段含义：
+#   policy_id              策略唯一 ID（写入 sla_policies.policy_id）
+#   policy_name            人类可读策略名
+#   dataset_pattern        dataset_id 通配符（fnmatch 风格），与 dataset_family 任一匹配即纳入；为 null 时跳过该过滤
+#   dataset_family         例 'lerobot' / 'droid' / 'robomimic' / 'bridgedata'
+#   deadline_hour          每日小时（UTC）截止；运营端用，引擎暂不做"小时级"判定
+#   required_outputs       期望产出列表；可选值：qc_contract / dwd / ads / ml_ready / raw
+#   min_qc_pass_rate       qc_pass_rate 阈值；ads 行的 qc_pass_rate 低于该值 → FAIL
+#   min_etl_success_rate   etl_success_rate 阈值
+#   max_failed_workflows   当日 workflow_runs 中 FAILED + ERROR 数量上限
+#   enabled                false 时跳过该策略
+
+policies:
+  - policy_id: devscale_daily_ready
+    policy_name: Devscale Daily Ready
+    dataset_pattern: "*dev*"
+    dataset_family: null
+    deadline_hour: 23
+    required_outputs:
+      - qc_contract
+      - dwd
+      - ads
+      - ml_ready
+    min_qc_pass_rate: 0.8
+    min_etl_success_rate: 0.8
+    max_failed_workflows: 0
+    enabled: true
+
+  - policy_id: lerobot_quality_minimum
+    policy_name: LeRobot family quality minimum
+    dataset_pattern: null
+    dataset_family: lerobot
+    deadline_hour: 6
+    required_outputs:
+      - qc_contract
+      - dwd
+    min_qc_pass_rate: 0.9
+    min_etl_success_rate: 0.9
+    max_failed_workflows: 1
+    enabled: true
+
+  - policy_id: scale30_nightly
+    policy_name: Scale30 Nightly
+    dataset_pattern: "*scale30*"
+    dataset_family: null
+    deadline_hour: 4
+    required_outputs:
+      - dwd
+      - ads
+    min_qc_pass_rate: 0.7
+    min_etl_success_rate: 0.7
+    max_failed_workflows: 2
+    enabled: false

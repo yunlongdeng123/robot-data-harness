@@ -1,6 +1,6 @@
 """F3 schema contract 守门：``EtlPerfRunRow`` 模型字段集必须显式声明并与 infra 端 PG schema 对齐。
 
-背景：``docs/v1_6_etl_perf_runs_schema_align_request.md`` §4.3。
+背景：``docs/history/v1_6_etl_perf_runs_schema_align_request.md`` §4.3。
 
 这套测试本身不连远端 PG，只做两件事：
 
@@ -22,7 +22,7 @@ from sqlalchemy import create_engine, inspect
 
 from robot_dh.warehouse.models import EtlPerfRunRow, ensure_lake_tables
 
-# 与 docs/v1_6_etl_perf_runs_schema_align_request.md §5 「远端对齐后字段约定」逐字段对齐
+# 与 docs/history/v1_6_etl_perf_runs_schema_align_request.md §5 「远端对齐后字段约定」逐字段对齐
 # 改动须三步走：(1) 更新本集合；(2) 通知 robot-dh-infra 加 migration；(3) PR 描述记录新增列
 EXPECTED_COLUMNS: frozenset[str] = frozenset(
     {
@@ -62,7 +62,7 @@ def test_etl_perf_runs_orm_columns_match_expected_set() -> None:
         "EtlPerfRunRow 与期望字段集不一致；"
         f"missing={sorted(missing)} extra={sorted(extra)}；"
         "改动需同步 (1) 本测试 EXPECTED_COLUMNS；(2) infra 端 migration；"
-        "(3) PR 描述列出新增列。参见 docs/v1_6_etl_perf_runs_schema_align_request.md §4.3。"
+        "(3) PR 描述列出新增列。参见 docs/history/v1_6_etl_perf_runs_schema_align_request.md §4.3。"
     )
 
 

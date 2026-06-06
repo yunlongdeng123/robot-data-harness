@@ -1,6 +1,6 @@
 """_manifest.json 构建与辅助函数。
 
-ods/dwd/ads 各 slice 产出旁路 _manifest.json，字段见 docs/v1_4_handoff_inbox.md（Manifest 节）。
+ods/dwd/ads 各 slice 产出旁路 _manifest.json，字段见 docs/history/v1_4_handoff_inbox.md（Manifest 节）。
 本模块为磁盘 manifest 结构的唯一约定来源。
 """
 

@@ -1,0 +1,52 @@
+# v1.9 默认模型注册表。
+#
+# 用法：robot-dh model register --config configs/model_registry.yaml
+# 字段含义见 docs/model_registry.md；backend 取值：mock / local_cpu / openai_compatible /
+# autodl_worker / http_json。openai_compatible 的 endpoint_url 留空时从
+# ROBOT_DH_OPENAI_COMPATIBLE_BASE_URL 读取，api_key 永不写本文件。
+
+models:
+  - model_id: mock-captioner-v1
+    model_name: Mock Captioner
+    model_type: caption
+    backend: mock
+    max_batch_size: 32
+    timeout_sec: 30
+    status: ACTIVE
+    tags:
+      modality: vision
+
+  - model_id: mock-embedding-v1
+    model_name: Mock Embedding
+    model_type: embedding
+    backend: mock
+    max_batch_size: 64
+    timeout_sec: 30
+    status: ACTIVE
+
+  - model_id: mock-anomaly-scorer-v1
+    model_name: Mock Anomaly Scorer
+    model_type: anomaly_scorer
+    backend: mock
+    max_batch_size: 64
+    timeout_sec: 30
+    status: ACTIVE
+
+  - model_id: local-rule-scorer-v1
+    model_name: Local Rule Scorer
+    model_type: anomaly_scorer
+    backend: local_cpu
+    max_batch_size: 64
+    timeout_sec: 30
+    status: ACTIVE
+
+  - model_id: openai-compatible-chat-v1
+    model_name: OpenAI Compatible Chat
+    model_type: llm
+    backend: openai_compatible
+    endpoint_url: ""
+    max_batch_size: 8
+    timeout_sec: 60
+    status: ACTIVE
+    tags:
+      note: endpoint_url 留空时读 ROBOT_DH_OPENAI_COMPATIBLE_BASE_URL

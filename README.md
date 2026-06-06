@@ -4,15 +4,15 @@
 
 **面向 Kubernetes 的多源机器人数据质量与评测平台**
 
-<sub>从原始数据集到 ML-ready Parquet：QC 合约 · 数据湖 ETL · Argo DAG · 数仓 14 表 · Spark 离线宽表</sub>
+<sub>从原始数据集到 ML-ready Parquet：QC 合约 · 数据湖 ETL · Argo DAG · 数仓 14 表 · Spark 离线宽表 · AI 推理数据平面</sub>
 
 <p>
   <img alt="python"   src="https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white">
-  <img alt="version"  src="https://img.shields.io/badge/version-v1.8-0E7C66">
+  <img alt="version"  src="https://img.shields.io/badge/version-v1.9-0E7C66">
   <img alt="kubernetes" src="https://img.shields.io/badge/runtime-kind%20%7C%20k8s-326CE5?logo=kubernetes&logoColor=white">
   <img alt="argo"     src="https://img.shields.io/badge/workflows-Argo-EF7B4D?logo=argo&logoColor=white">
   <img alt="storage"  src="https://img.shields.io/badge/storage-PostgreSQL%20%7C%20MinIO%20%7C%20Redis-336791?logo=postgresql&logoColor=white">
-  <img alt="tests"    src="https://img.shields.io/badge/tests-363%20passed-success">
+  <img alt="tests"    src="https://img.shields.io/badge/tests-403%20passed-success">
 </p>
 
 </div>
@@ -151,7 +151,7 @@ curl -s "http://localhost:8000/quality/summary?date=$(date -u +%F)" | jq
 ### 4. 跑测试
 
 ```bash
-make test     # 363 passed / 17 skipped（远端 / spark 集成测试默认 skip）
+make test     # 403 passed / 20 skipped（远端 / spark 集成测试默认 skip）
 ```
 
 ## 支持的数据集 & 运行模式
@@ -234,7 +234,7 @@ robot-data-harness/
 ├── k8s/                  # Deployment / Job / CronJob
 ├── postgres/migrations/  # PG schema 迁移
 ├── warehouse/            # SQL DML 模板（PG + Spark）
-├── tests/                # pytest（363 passed / 17 skipped）
+├── tests/                # pytest（403 passed / 20 skipped）
 ├── Makefile              # 一键入口
 └── README.dev.md         # 仓库开发详细文档
 ```
@@ -242,7 +242,8 @@ robot-data-harness/
 ## 文档
 
 - [`README.dev.md`](README.dev.md) — 完整开发文档（CLI 全量参数、API 参考、Makefile 目标、故障排查、版本演进 v1.3 → v1.8、端到端命令清单）
-- [`docs/`](docs/) — 设计文档与版本交接（v1.4 数据湖、v1.5 Argo、v1.6 多源平台、v1.7 Local-First、v1.8 数仓 / SLA / quality ops）
+- [`docs/`](docs/) — 当前设计与规范（`lake_layout.md` 数据湖布局、`robot_platform_*.md` 多源平台 schema / runbook、`v1_8_*.md` 数仓 / SLA / quality ops、`inference_data_plane_schema.md` / `inference_ops_runbook.md` / `autodl_worker_notes.md` 推理数据平面）
+- [`docs/history/`](docs/history/) — 历史版本交接与排障需求归档（v1.4 ~ v1.8 的 handoff / request / prompt，仅作字段约定与历史参考）
 - [`argo/README.md`](argo/README.md) — Argo WorkflowTemplate 使用与提交流程
 - [`warehouse/spark/README.md`](warehouse/spark/README.md) — Spark local mode 离线宽表（可选）
 
@@ -256,6 +257,53 @@ robot-data-harness/
 | **v1.6** | 多源 QC Contract、ML-ready、Argo Multi-Source DAG、Prometheus exporter |
 | **v1.7** | Local-First Runtime、Adapter Registry、本地 file URI 一等公民、Argo Local DAG |
 | **v1.8** | 数仓 14 表（DIM/FACT/DWS/ADS）、quality / SLA / backfill、Spark local mode 宽表 |
+| **v1.9** | AI Inference Data Plane Lite：模型注册 / 推理任务 / 推理输出 / 蒸馏数据集 / 推理 benchmark（mock / CPU / OpenAI-compatible 后端） |
+
+## v1.9 AI Inference Data Plane Lite
+
+把平台从「ML-ready 数据集」延伸到 AI 数据生产飞轮的关键一环，**不强依赖 GPU / vLLM**，先支持 `mock` / `local_cpu` / `openai_compatible` 后端，AutoDL GPU 仅作可插拔推理后端：
+
+```
+ML-ready Dataset → Model Registry → Batch Inference
+  → Pseudo Labels / Captions / Embeddings → Distillation Dataset
+  → Inference Benchmark → Warehouse / Quality Ops 回流
+```
+
+infra 侧交付物（Prompt A）：
+
+- **PG schema**：`postgres/migrations/007_inference_data_plane.sql`（10 张表：`model_registry` / `inference_jobs` / `inference_outputs` / `inference_failures` / `distillation_datasets` / `inference_benchmark_runs` / `ai_task_events` / `dead_letter_tasks` / `dws_inference_job_daily` / `ads_inference_dashboard`，幂等非破坏）。
+- **运维脚本**：`infra/scripts/45~49_*.sh`（部署到云端 `/opt/robot-dh-infra/scripts/`）。
+- **client / Secret**：`client/robot-dh-platform.{env.example, secret yaml, create sh}` 原地扩展推理变量。
+- **文档**：`docs/inference_data_plane_schema.md`、`docs/inference_ops_runbook.md`、`docs/autodl_worker_notes.md`。
+
+infra 侧验收命令（在云端 `/opt/robot-dh-infra` 执行，全部幂等、不破坏既有数据）：
+
+```bash
+cd /opt/robot-dh-infra
+./scripts/06_healthcheck.sh
+./scripts/45_pg_apply_inference_schema.sh     # 应用 007 schema，列出 v1.9 新表
+./scripts/46_pg_inference_smoke_test.sh       # robot_dh_app 读写权限验证，插入后清理
+./scripts/47_inference_ops_report.sh          # 推理运营报告（MD + JSON）
+./scripts/48_distill_dataset_report.sh        # 蒸馏数据集报告（MD + JSON）
+./scripts/49_export_inference_client_env.sh   # 导出 client env（默认脱敏）
+```
+
+### 主项目侧（Prompt B / C）
+
+- **Model Registry**：`robot-dh model register/list/show/health`；PG 优先，DB 不可用回退本地 JSON。
+- **三类后端**：`mock`（确定性假结果）/ `local_cpu`（纯 CPU 规则 + feature-hashing）/ `openai_compatible`（vLLM 等 OpenAI 协议 endpoint）；`autodl_worker` 为可插拔 GPU 后端。
+- **批量推理**：`robot-dh infer run` 产出 `predictions.parquet` / `failed_samples.parquet` / `inference_report.json` / `_manifest.json`，DB 可用时回流 `inference_jobs/outputs/failures` + `ai_task_events`。
+- **蒸馏**：`robot-dh distill build` 产出 `train/val/test.jsonl` + `dataset_card.md`（`instruction_tuning` / `caption_sft` / `embedding_pairs` / `anomaly_detection`）。
+- **benchmark + 回流**：`robot-dh infer benchmark`（JSON/HTML/CSV）；`robot-dh warehouse build --layers inference` 物化 `dws_inference_job_daily` / `ads_inference_dashboard`，`quality summary` 含推理指标。
+- **AutoDL GPU worker（可选，Prompt C）**：`workers/autodl_inference_worker/` pull-based worker，从 PG 认领 `QUEUED` 任务、vLLM 推理、结果写回 MinIO；不租 AutoDL 也能用 mock/CPU 跑通整条飞轮。
+- **文档**：`docs/inference_data_plane.md`、`docs/model_registry.md`、`docs/distillation.md`、`docs/autodl_gpu_worker.md`、`docs/vllm_openai_compatible.md`。
+
+本地验收（纯本地，无 GPU / 无远端）：
+
+```bash
+make test                       # 全量测试（含 v1.9 推理 / 蒸馏 / worker 套件）
+make v1-9-inference-smoke       # model register → infer → benchmark → distill → warehouse → quality
+```
 
 ## License
 

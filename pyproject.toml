@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "robot-data-harness"
-version = "0.1.7"
+version = "0.1.9"
 description = "面向 Kubernetes 的机器人数据质量与评测框架（Robot Data Harness），覆盖数据湖、Scale ETL、多源 QC contract、ML-ready 导出、Argo 多源 DAG、Prometheus exporter，以及 v1.7 本地 file URI / Argo Local DAG / devscale 数据运行时"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -36,6 +36,11 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8.2,<9",
+]
+# v1.8 promptC：SparkSQL local mode 离线数仓宽表（DWS/ADS parquet）。
+# 仅本地开发流程对齐使用，不强制安装，不引入 Hadoop / Hive。
+spark = [
+  "pyspark>=3.5,<4",
 ]
 
 [project.scripts]

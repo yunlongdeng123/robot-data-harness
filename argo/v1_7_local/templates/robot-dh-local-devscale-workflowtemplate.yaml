@@ -199,8 +199,27 @@ spec:
             depends: "publish-lineage"
             template: argo-sync
 
-          - name: archive-logs-index
+          # ---- v1.8 接入：argo-sync 把 workflow_runs / workflow_steps 落库后，
+          # 立刻 trigger warehouse 分层 + 质检 / SLA 报告，让 plvvj 跑完
+          # 同一条 DAG 直接产出 Grafana 大屏需要的 DWS / ADS。
+          - name: warehouse-init
             depends: "argo-sync"
+            template: warehouse-init
+
+          - name: warehouse-build
+            depends: "warehouse-init"
+            template: warehouse-build
+
+          - name: quality-report
+            depends: "warehouse-build"
+            template: quality-report
+
+          - name: sla-check
+            depends: "warehouse-build"
+            template: sla-check
+
+          - name: archive-logs-index
+            depends: "quality-report && sla-check"
             template: archive-logs-index
 
     # ============================== 节点模板 ==============================
@@ -727,3 +746,188 @@ spec:
           requests: {cpu: 250m, memory: 256Mi}
           limits:   {cpu: 1,    memory: 1Gi}
       activeDeadlineSeconds: 600
+
+    # ====================== v1.8 warehouse 收尾段 ======================
+    # 这 4 个 step 让 plvvj 跑完直接产出 Grafana 大屏依赖的 DWS / ADS / 报告，
+    # 不再需要人工 trigger `make warehouse-build`。pipeline:
+    #   argo-sync → warehouse-init → warehouse-build → {quality-report,sla-check} → archive-logs-index
+    # 都用同一个 robot-data-harness:local 镜像，PG 凭据走 robot-dh-local-runtime ConfigMap。
+    - name: warehouse-init
+      podSpecPatch: |
+        terminationGracePeriodSeconds: 30
+      volumes:
+        - name: local-data
+          persistentVolumeClaim:
+            claimName: robot-dh-local-data-pvc
+        - name: tmp
+          emptyDir: {sizeLimit: 256Mi}
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -o pipefail
+            python -u -m robot_dh.cli warehouse init \
+              --config configs/warehouse.yaml 2>&1 | tee /tmp/warehouse-init.log
+        env:
+          - {name: ROBOT_DH_LOCAL_DATA_ROOT, value: "{{workflow.parameters.local_data_root}}"}
+          - {name: PYTHONUNBUFFERED,         value: "1"}
+        envFrom:
+          - configMapRef: {name: robot-dh-local-runtime, optional: true}
+        volumeMounts:
+          - {name: local-data, mountPath: /mnt/local-data/robot-dh-local}
+          - {name: tmp,        mountPath: /tmp}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 250m, memory: 256Mi}
+          limits:   {cpu: 1,    memory: 1Gi}
+      activeDeadlineSeconds: 300
+      retryStrategy:
+        limit: 1
+        retryPolicy: "Always"
+
+    - name: warehouse-build
+      podSpecPatch: |
+        terminationGracePeriodSeconds: 30
+      volumes:
+        - name: local-data
+          persistentVolumeClaim:
+            claimName: robot-dh-local-data-pvc
+        - name: tmp
+          emptyDir: {sizeLimit: 256Mi}
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -o pipefail
+            # 默认窗口 = 当天向前 1 天（plvvj 跑完后立刻 build 当天 + 昨日补漏）
+            DT_TODAY="$(date -u +%Y-%m-%d)"
+            DT_YDAY="$(date -u -d '1 day ago' +%Y-%m-%d)"
+            python -u -m robot_dh.cli warehouse build \
+              --config configs/warehouse.yaml \
+              --from-date "${DT_YDAY}" --to-date "${DT_TODAY}" \
+              --layers dim,fact,dws,ads 2>&1 | tee /tmp/warehouse-build.log
+        env:
+          - {name: ROBOT_DH_LOCAL_DATA_ROOT, value: "{{workflow.parameters.local_data_root}}"}
+          - {name: PYTHONUNBUFFERED,         value: "1"}
+        envFrom:
+          - configMapRef: {name: robot-dh-local-runtime, optional: true}
+        volumeMounts:
+          - {name: local-data, mountPath: /mnt/local-data/robot-dh-local}
+          - {name: tmp,        mountPath: /tmp}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 500m, memory: 512Mi}
+          limits:   {cpu: 2,    memory: 2Gi}
+      activeDeadlineSeconds: 1200
+      retryStrategy:
+        limit: 1
+        retryPolicy: "Always"
+
+    - name: quality-report
+      podSpecPatch: |
+        terminationGracePeriodSeconds: 30
+      volumes:
+        - name: local-data
+          persistentVolumeClaim:
+            claimName: robot-dh-local-data-pvc
+        - name: tmp
+          emptyDir: {sizeLimit: 256Mi}
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -o pipefail
+            OUT="/mnt/local-data/robot-dh-local/lake/quality-reports/{{workflow.name}}"
+            mkdir -p "${OUT}"
+            python -u -m robot_dh.cli quality report \
+              --output "${OUT}" 2>&1 | tee /tmp/quality-report.log
+        env:
+          - {name: ROBOT_DH_LOCAL_DATA_ROOT, value: "{{workflow.parameters.local_data_root}}"}
+          - {name: PYTHONUNBUFFERED,         value: "1"}
+        envFrom:
+          - configMapRef: {name: robot-dh-local-runtime, optional: true}
+        volumeMounts:
+          - {name: local-data, mountPath: /mnt/local-data/robot-dh-local}
+          - {name: tmp,        mountPath: /tmp}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 250m, memory: 512Mi}
+          limits:   {cpu: 1,    memory: 2Gi}
+      activeDeadlineSeconds: 600
+      retryStrategy:
+        limit: 1
+        retryPolicy: "Always"
+
+    - name: sla-check
+      podSpecPatch: |
+        terminationGracePeriodSeconds: 30
+      volumes:
+        - name: local-data
+          persistentVolumeClaim:
+            claimName: robot-dh-local-data-pvc
+        - name: tmp
+          emptyDir: {sizeLimit: 256Mi}
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -o pipefail
+            OUT="/mnt/local-data/robot-dh-local/lake/sla-reports/{{workflow.name}}"
+            mkdir -p "${OUT}"
+            python -u -m robot_dh.cli sla check \
+              --policy configs/sla_policies.yaml 2>&1 | tee /tmp/sla-check.log
+            python -u -m robot_dh.cli sla report \
+              --policy configs/sla_policies.yaml \
+              --output "${OUT}" 2>&1 | tee -a /tmp/sla-check.log
+        env:
+          - {name: ROBOT_DH_LOCAL_DATA_ROOT, value: "{{workflow.parameters.local_data_root}}"}
+          - {name: PYTHONUNBUFFERED,         value: "1"}
+        envFrom:
+          - configMapRef: {name: robot-dh-local-runtime, optional: true}
+        volumeMounts:
+          - {name: local-data, mountPath: /mnt/local-data/robot-dh-local}
+          - {name: tmp,        mountPath: /tmp}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 250m, memory: 512Mi}
+          limits:   {cpu: 1,    memory: 2Gi}
+      activeDeadlineSeconds: 600
+      retryStrategy:
+        limit: 1
+        retryPolicy: "Always"

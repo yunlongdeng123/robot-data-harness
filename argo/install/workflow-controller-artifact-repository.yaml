@@ -2,7 +2,7 @@
 #
 # 作用：让 controller 在 step pod 进入终态时，把 stdout/stderr 上传到云端 MinIO 的
 #       robot-dh-artifacts/argo-logs/<ns>/<workflow.name>/<pod.name>/main.log
-# 背景：详见 docs/v1_6_argo_log_archive_request.md（来自 robot-dh-infra 的需求）
+# 背景：详见 docs/history/v1_6_argo_log_archive_request.md（来自 robot-dh-infra 的需求）
 #
 # 注意：
 #   - 本文件只是 patch 模板。controller 自己的 ConfigMap 由 quick-start-minimal.yaml
@@ -12,7 +12,7 @@
 #   - endpoint / accessKey / secretKey 不写在这里，由 apply 脚本从
 #     robot-dh/robot-dh-v1-6-secrets 读 ROBOT_DH_S3_ENDPOINT_URL，
 #     再渲染到 ConfigMap data.artifactRepository。
-#   - bucket / keyFormat 与 robot-dh-infra 的需求（docs/v1_6_argo_log_archive_request.md §4）
+#   - bucket / keyFormat 与 robot-dh-infra 的需求（docs/history/v1_6_argo_log_archive_request.md §4）
 #     保持一致；改动需双方同步。
 apiVersion: v1
 kind: ConfigMap

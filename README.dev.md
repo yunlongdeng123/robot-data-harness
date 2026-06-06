@@ -1200,7 +1200,7 @@ make k8s-delete-lake-jobs   # 只删 jobs，不动 namespace / secret / debug po
 
 ### 接收侧交接物清单
 
-详见 `docs/v1_4_handoff_inbox.md`。本仓库针对 SSH 暂不可用时已经做了完整的"直连反查"补救，所有 v1.4 关键资产（env、SQL、policy、资产清单）都在仓库内有对应文件。SSH 恢复后用 `scripts/fetch_v1_4_handoff.sh` 拉云端权威版覆盖即可。
+详见 `docs/history/v1_4_handoff_inbox.md`。本仓库针对 SSH 暂不可用时已经做了完整的"直连反查"补救，所有 v1.4 关键资产（env、SQL、policy、资产清单）都在仓库内有对应文件。SSH 恢复后用 `scripts/fetch_v1_4_handoff.sh` 拉云端权威版覆盖即可。
 
 ## v1.5 Scale Benchmark + Sharded ETL + Runtime Profiling
 
@@ -1304,7 +1304,7 @@ kubectl -n robot-dh describe pod <pod-name>
 kubectl -n robot-dh logs -f <pod-name> -c main
 ```
 
-历史事故与优化方向见 [`docs/v1_5_scale_etl_deadline_report.md`](./docs/v1_5_scale_etl_deadline_report.md)。
+历史事故与优化方向见 [`docs/history/v1_5_scale_etl_deadline_report.md`](./docs/history/v1_5_scale_etl_deadline_report.md)。
 
 ### performance metrics 字段含义
 
@@ -1395,7 +1395,7 @@ v1.5 把上述 CLI 编排成 Argo Workflows：
 - RBAC + ConfigMap + Secret 示例：`k8s/v1_5_argo/`
 - 跨 step 用 S3 URI 传 plan / shard summary，避免 Argo artifact repository 配置成本
 
-具体目录与上线流程见 [`argo/README.md`](./argo/README.md) 与 [`docs/v1_5_argo_workflow.md`](./docs/v1_5_argo_workflow.md)。常用 Make target：
+具体目录与上线流程见 [`argo/README.md`](./argo/README.md) 与 [`docs/history/v1_5_argo_workflow.md`](./docs/history/v1_5_argo_workflow.md)。常用 Make target：
 
 ```
 make argo-install
@@ -1666,7 +1666,7 @@ curl http://localhost:9108/metrics | grep robot_dh_qc_contract
 
 ## v1.6.6 ~ v1.6.8 — 多源 scale30 实跑回归修复
 
-v1.6.1 ~ v1.6.5 上线后，在 kind 集群跑了 5 轮 `robot-dh-multisource-scale30-{fhkvr,qptk9,ddbfb,fvx5z,dls4z}`，从 archiveLogs 归档把 9 类失败定位到位并写回主线。这一节只记录结论与守门测试，**完整根因 / 复现 / archive log 行号留在 `docs/v1_6_*_request.md` 与 `docs/runs/<date>/<workflow>/INDEX.md`**。
+v1.6.1 ~ v1.6.5 上线后，在 kind 集群跑了 5 轮 `robot-dh-multisource-scale30-{fhkvr,qptk9,ddbfb,fvx5z,dls4z}`，从 archiveLogs 归档把 9 类失败定位到位并写回主线。这一节只记录结论与守门测试，**完整根因 / 复现 / archive log 行号已归档到 `docs/history/v1_6_*_request.md`**（原 `docs/runs/<date>/<workflow>/` 一次性排障日志已清理，根因沉淀进 `.cursor/rules/memory.mdc`）。
 
 ### 失败矩阵（每条都有对应 pytest 守门）
 
@@ -1997,8 +1997,8 @@ curl -s http://localhost:9108/healthz | jq
 > 目标：让 Argo workflow 不再从腾讯云 MinIO 跨公网拉 18 GiB DROID / 6 GiB robomimic
 > 到 Docker Desktop / WSL VHDX，而是把 ≤ 3 GB 的 devscale 数据一次性同步到 Windows
 > D 盘，kind 通过 `extraMounts` 挂载 D 盘目录到 node，Pod 直接读本地。
-> 详见 [`docs/v1_7_local_data_runtime.md`](docs/v1_7_local_data_runtime.md) +
-> [`docs/v1_7_windows_d_drive_kind_mount.md`](docs/v1_7_windows_d_drive_kind_mount.md)。
+> 详见 [`docs/history/v1_7_local_data_runtime.md`](docs/history/v1_7_local_data_runtime.md) +
+> [`docs/history/v1_7_windows_d_drive_kind_mount.md`](docs/history/v1_7_windows_d_drive_kind_mount.md)。
 
 ### 三层数据策略
 
@@ -2253,7 +2253,7 @@ GET  /sla/checks?date=2026-05-25
 | 何时跑 | 命令 |
 |---|---|
 | 仅本地 SQLite 模式（最快） | 无前置；直接进 7.1 |
-| 远端 PostgreSQL 真源模式 | `source ~/.config/robot-dh/robot-dh-lake.env` 让 `ROBOT_DH_DB_URI` / `ROBOT_DH_S3_*` 进环境；handoff 资料见 `docs/v1_8_wsl_handoff.md` |
+| 远端 PostgreSQL 真源模式 | `source ~/.config/robot-dh/robot-dh-lake.env` 让 `ROBOT_DH_DB_URI` / `ROBOT_DH_S3_*` 进环境；handoff 资料见 `docs/history/v1_8_wsl_handoff.md` |
 | 跑 promptC SparkSQL（可选） | `make spark-install` 装 pyspark；系统需有 JDK 11+（无则 `conda install -c conda-forge openjdk=17`） |
 
 每条命令都用 `V1_8_DATE`（默认 `yesterday UTC`）控制聚合日期。要锁日期跑：

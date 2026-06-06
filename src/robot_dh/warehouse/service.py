@@ -480,7 +480,15 @@ class WarehouseService:
         raise V15SchemaMissingError(msg)
 
     def record_etl_perf_run(self, record: Any) -> int | None:
-        """写一条 etl_perf_runs；record 是 PerfRecord（重复 import 时只取 to_dict）。"""
+        """写一条 etl_perf_runs；record 是 PerfRecord（重复 import 时只取 to_dict）。
+
+        与远端 schema 解耦：先用 ``inspect`` 嗅探 ``etl_perf_runs`` 真实列集合，
+        然后用 SQLAlchemy core ``insert(...).values(...)`` **只**带 PG 上真实存在的列；
+        ORM 模型多出来的列（典型如 v1.5 远端只有 ``created_at``，缺
+        ``started_at`` / ``finished_at``）走 ``metrics_json`` 兜底携带，
+        既不破坏 INSERT 也不丢数据；下游 DML（``build_fact_etl_run.sql``）已经会
+        从 ``metrics_json`` 取这两个时间字段，pass-through 完整。
+        """
         try:
             from robot_dh.perf.profiler import PerfRecord  # 延迟导入避免循环
         except Exception:
@@ -489,35 +497,58 @@ class WarehouseService:
         try:
             if not self._ensure_v1_5_tables_or_warn("record_etl_perf_run"):
                 return None
+
+            from sqlalchemy import insert as _sa_insert
+
+            engine = self._get_engine()
+            existing_cols = {
+                c["name"]
+                for c in inspect(engine).get_columns("etl_perf_runs")
+            }
+            payload = record.to_dict() if hasattr(record, "to_dict") else dict(record)
+
+            started_at = _parse_dt(payload.get("started_at"))
+            finished_at = _parse_dt(payload.get("finished_at"))
+            metrics_json = dict(payload.get("metrics") or {})
+            if "started_at" not in existing_cols and started_at is not None:
+                metrics_json["started_at"] = started_at.isoformat()
+            if "finished_at" not in existing_cols and finished_at is not None:
+                metrics_json["finished_at"] = finished_at.isoformat()
+
+            full_values: dict[str, Any] = dict(
+                job_id=str(payload.get("job_id", "")),
+                run_id=str(payload.get("run_id", "")),
+                dataset_id=str(payload.get("dataset_id", "")),
+                version=str(payload.get("version", "")),
+                phase=str(payload.get("phase", "")),
+                input_uri=payload.get("input_uri"),
+                output_uri=payload.get("output_uri"),
+                input_bytes=int(payload.get("input_bytes") or 0),
+                output_bytes=int(payload.get("output_bytes") or 0),
+                input_rows=int(payload.get("input_rows") or 0),
+                output_rows=int(payload.get("output_rows") or 0),
+                duration_sec=float(payload.get("duration_sec") or 0.0),
+                download_duration_sec=float(payload.get("download_duration_sec") or 0.0),
+                upload_duration_sec=float(payload.get("upload_duration_sec") or 0.0),
+                compute_duration_sec=float(payload.get("compute_duration_sec") or 0.0),
+                peak_memory_mb=float(payload.get("peak_memory_mb") or 0.0),
+                worker_id=payload.get("worker_id"),
+                status=str(payload.get("status") or "OK"),
+                error_message=payload.get("error_message"),
+                started_at=started_at,
+                finished_at=finished_at,
+                metrics_json=metrics_json,
+            )
+            # 只保留 PG 实际有的列，避免 UndefinedColumn 把整批 INSERT 拒绝。
+            filtered = {k: v for k, v in full_values.items() if k in existing_cols}
+
             with self._session() as session:
-                payload = record.to_dict() if hasattr(record, "to_dict") else dict(record)
-                row = EtlPerfRunRow(
-                    job_id=str(payload.get("job_id", "")),
-                    run_id=str(payload.get("run_id", "")),
-                    dataset_id=str(payload.get("dataset_id", "")),
-                    version=str(payload.get("version", "")),
-                    phase=str(payload.get("phase", "")),
-                    input_uri=payload.get("input_uri"),
-                    output_uri=payload.get("output_uri"),
-                    input_bytes=int(payload.get("input_bytes") or 0),
-                    output_bytes=int(payload.get("output_bytes") or 0),
-                    input_rows=int(payload.get("input_rows") or 0),
-                    output_rows=int(payload.get("output_rows") or 0),
-                    duration_sec=float(payload.get("duration_sec") or 0.0),
-                    download_duration_sec=float(payload.get("download_duration_sec") or 0.0),
-                    upload_duration_sec=float(payload.get("upload_duration_sec") or 0.0),
-                    compute_duration_sec=float(payload.get("compute_duration_sec") or 0.0),
-                    peak_memory_mb=float(payload.get("peak_memory_mb") or 0.0),
-                    worker_id=payload.get("worker_id"),
-                    status=str(payload.get("status") or "OK"),
-                    error_message=payload.get("error_message"),
-                    started_at=_parse_dt(payload.get("started_at")),
-                    finished_at=_parse_dt(payload.get("finished_at")),
-                    metrics_json=dict(payload.get("metrics") or {}),
+                result = session.execute(
+                    _sa_insert(EtlPerfRunRow.__table__).values(**filtered).returning(EtlPerfRunRow.id)
                 )
-                session.add(row)
+                row_id = int(result.scalar_one())
                 session.commit()
-                return row.id
+                return row_id
         except (SQLAlchemyError, V15SchemaMissingError) as err:
             self._handle_write_error("record_etl_perf_run", err)
             return None

@@ -8,7 +8,7 @@ DB 路径采用 soft 写入：表缺失 / 连接失败时仅 warning，不影响
   待 infra 跑完 migration 后用 ``robot-dh perf reingest-pending`` 批量回灌。
 - ``loud``：保持旧行为（向上抛 ``V15SchemaMissingError``），CI 守门用。
 
-详细背景：``docs/v1_6_etl_perf_runs_schema_align_request.md`` §4.2。
+详细背景：``docs/history/v1_6_etl_perf_runs_schema_align_request.md`` §4.2。
 """
 
 from __future__ import annotations
@@ -91,6 +91,15 @@ def perf_records_from_etl_run(
     feat = etl_result.features
     ads = etl_result.ads
     if norm is not None:
+        # v1.8 修复：
+        # 1) status 从 NormalizeResult 透传（OK / SKIPPED / RESUMED / WARN），
+        #    不再硬编码 "OK"，避免和 runner.py 顶层口径不一致；
+        # 2) metrics 合并 NormalizeResult.metrics（sub-stage profile 数据），
+        #    避免 PG 里这条记录的 metrics_json 永远是空字典 / 失去诊断信息。
+        norm_status = str(getattr(norm, "status", "OK") or "OK")
+        norm_metrics: dict[str, Any] = {}
+        for k, v in (getattr(norm, "metrics", None) or {}).items():
+            norm_metrics[str(k)] = v
         out.append(
             PerfRecord(
                 job_id=norm.job_id,
@@ -105,7 +114,8 @@ def perf_records_from_etl_run(
                 input_rows=int(norm.num_samples),
                 output_rows=sum_file_rows(norm.files or []),
                 duration_sec=float(norm.duration_job_sec),
-                status="OK",
+                status=norm_status,
+                metrics=norm_metrics,
             )
         )
     if feat is not None:

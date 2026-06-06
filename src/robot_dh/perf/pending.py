@@ -1,6 +1,6 @@
 """perf record pending 存储：远端 etl_perf_runs schema 漂移时的兜底落盘 + S3 mirror。
 
-背景见 `docs/v1_6_etl_perf_runs_schema_align_request.md`。当 `WarehouseService.record_etl_perf_run`
+背景见 `docs/history/v1_6_etl_perf_runs_schema_align_request.md`。当 `WarehouseService.record_etl_perf_run`
 抛 `V15SchemaMissingError`（infra 端 PG 表缺列）时，调用方不再 abort 整个 ETL step，
 而是把 record 写到本地 pending 目录 + best-effort 同步到 S3
 `s3://robot-dh-artifacts/perf-records-pending/...`，等 infra 跑完 migration 后再用

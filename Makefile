@@ -394,8 +394,8 @@ argo-delete-completed:
 	./argo/scripts/argo_delete_completed.sh
 
 # ---------- v1.6 Argo log archive（来自 robot-dh-infra 的需求） ----------
-# 详见 docs/v1_6_argo_log_archive_request.md（接收方文档）和
-# docs/v1_6_argo_log_archive_handoff.md（完成回执）。
+# 详见 docs/history/v1_6_argo_log_archive_request.md（接收方文档）和
+# docs/history/v1_6_argo_log_archive_handoff.md（完成回执）。
 
 .PHONY: argo-sync-log-archive-secret argo-apply-log-archive \
         argo-verify-log-archive argo-enable-log-archive
@@ -527,7 +527,7 @@ platform-smoke:
 
 
 # ---------- v1.7 Local-First Data Runtime（Windows D 盘 + 专用 kind）----------
-# 详见 docs/v1_7_local_data_runtime.md 与 docs/v1_7_windows_d_drive_kind_mount.md。
+# 详见 docs/history/v1_7_local_data_runtime.md 与 docs/history/v1_7_windows_d_drive_kind_mount.md。
 #
 # 三层数据策略：
 #   devscale  ≤ 3GB    本地 kind robot-dh-dev，默认入口
@@ -822,3 +822,184 @@ v1-7-local-platform-smoke:
 	@echo ""
 	@echo "== v1.7 local PLATFORM smoke completed =="
 	@echo "下一步：make argo-local-submit  # 然后 make argo-local-tail 看实时日志"
+
+# ---------------------------------------------------------------------------
+# v1.8 Warehouse Metrics & Quality Ops
+# ---------------------------------------------------------------------------
+#
+# 设计要点：
+#   - 本节命令默认走 ROBOT_DH_DB_URI（远端 PostgreSQL）；
+#     未配置时 fallback 到 ./.robot_dh/robot_dh.db（SQLite），适合 make test / 离线 demo。
+#   - warehouse build 在 SQLite 走 Python 端聚合；PostgreSQL 走 warehouse/sql/dml/*.sql。
+#   - quality / sla / backfill 三个 target 不依赖远端 MinIO / Redis，可在 WSL 单机跑通。
+#
+# 关键变量（可命令行覆盖）：
+#   V1_8_DATE                  默认昨天（UTC）
+#   V1_8_FROM / V1_8_TO        默认 V1_8_DATE
+#   V1_8_LAYERS                逗号分隔，默认 'dim,fact,dws,ads'
+#   V1_8_WAREHOUSE_CONFIG      默认 configs/warehouse.yaml
+#   V1_8_SLA_POLICY            默认 configs/sla_policies.yaml
+#   V1_8_QUERY_TABLE           warehouse query 表名
+#   V1_8_REPORT_OUT            quality report / sla report / backfill plan 输出目录
+
+V1_8_DATE ?= $(shell date -u -d 'yesterday' +%Y-%m-%d 2>/dev/null || python3 -c "from datetime import datetime,timedelta; print((datetime.utcnow()-timedelta(days=1)).strftime('%Y-%m-%d'))")
+V1_8_FROM ?= $(V1_8_DATE)
+V1_8_TO ?= $(V1_8_DATE)
+V1_8_LAYERS ?= dim,fact,dws,ads
+V1_8_WAREHOUSE_CONFIG ?= configs/warehouse.yaml
+V1_8_SLA_POLICY ?= configs/sla_policies.yaml
+V1_8_QUERY_TABLE ?= ads_quality_dashboard
+V1_8_REPORT_OUT ?= runs/v1_8
+
+.PHONY: warehouse-init warehouse-build-local warehouse-query warehouse-export-local \
+        quality-summary quality-report backfill-plan sla-check v1-8-warehouse-smoke \
+        spark-install spark-build-quality-ads-local spark-test
+
+warehouse-init:
+	@$(PYTHON) -m robot_dh.cli warehouse init --config $(V1_8_WAREHOUSE_CONFIG) $(if $(APPLY_DDL),--apply-ddl,)
+
+warehouse-build-local:
+	@mkdir -p $(V1_8_REPORT_OUT)
+	@$(PYTHON) -m robot_dh.cli warehouse build \
+		--config $(V1_8_WAREHOUSE_CONFIG) \
+		--from-date $(V1_8_FROM) --to-date $(V1_8_TO) \
+		--layers $(V1_8_LAYERS) \
+		--output-root file://$(abspath $(V1_8_REPORT_OUT))/build
+
+warehouse-query:
+	@$(PYTHON) -m robot_dh.cli warehouse query \
+		--config $(V1_8_WAREHOUSE_CONFIG) \
+		--table $(V1_8_QUERY_TABLE) \
+		--limit $(or $(LIMIT),20) \
+		--output $(or $(FORMAT),table)
+
+warehouse-export-local:
+	@mkdir -p $(V1_8_REPORT_OUT)/export
+	@$(PYTHON) -m robot_dh.cli warehouse export \
+		--config $(V1_8_WAREHOUSE_CONFIG) \
+		--table $(V1_8_QUERY_TABLE) \
+		--date $(V1_8_DATE) \
+		--format $(or $(FORMAT),parquet) \
+		--output file://$(abspath $(V1_8_REPORT_OUT))/export/$(V1_8_QUERY_TABLE)/dt=$(V1_8_DATE)
+
+quality-summary:
+	@$(PYTHON) -m robot_dh.cli quality summary --date $(V1_8_DATE) --output json
+
+quality-report:
+	@mkdir -p $(V1_8_REPORT_OUT)/quality_report
+	@$(PYTHON) -m robot_dh.cli quality report \
+		--date $(V1_8_DATE) \
+		--output $(V1_8_REPORT_OUT)/quality_report
+
+backfill-plan:
+	@mkdir -p $(V1_8_REPORT_OUT)/backfill
+	@$(PYTHON) -m robot_dh.cli backfill plan \
+		--from-date $(V1_8_FROM) --to-date $(V1_8_TO) \
+		$(if $(DATASET_ID),--dataset $(DATASET_ID),) \
+		$(if $(VERSION),--version $(VERSION),) \
+		$(if $(PHASE),--phase $(PHASE),) \
+		$(if $(REASON),--reason "$(REASON)",) \
+		$(if $(DRY_RUN),--dry-run,) \
+		--output $(V1_8_REPORT_OUT)/backfill
+
+sla-check:
+	@$(PYTHON) -m robot_dh.cli sla check --date $(V1_8_DATE) --policy $(V1_8_SLA_POLICY) \
+		$(if $(DRY_RUN),--dry-run,)
+
+# v1.8 smoke：本地一次性回环（不依赖远端，SQLite 也能跑）
+v1-8-warehouse-smoke:
+	@echo "== v1.8 warehouse smoke =="
+	@$(MAKE) warehouse-init >/dev/null 2>&1 || true
+	@echo "[1/6] warehouse init"
+	@$(PYTHON) -m robot_dh.cli warehouse init --config $(V1_8_WAREHOUSE_CONFIG) | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('    backend=%s  schema=%s  existing=%d  missing=%d' % (d['backend'], d['schema'], len(d['existing_tables']), len(d['missing_tables'])))"
+	@echo "[2/6] warehouse build $(V1_8_DATE)"
+	@$(PYTHON) -m robot_dh.cli warehouse build --config $(V1_8_WAREHOUSE_CONFIG) --date $(V1_8_DATE) | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('    status=%s  layers=%s' % (d['status'], d['layers']))"
+	@echo "[3/6] warehouse query ads_quality_dashboard"
+	@$(PYTHON) -m robot_dh.cli warehouse query --config $(V1_8_WAREHOUSE_CONFIG) --table ads_quality_dashboard --limit 5 --output table | head -5 | sed 's/^/    /'
+	@echo "[4/6] quality report -> $(V1_8_REPORT_OUT)/quality_report"
+	@mkdir -p $(V1_8_REPORT_OUT)/quality_report
+	@$(PYTHON) -m robot_dh.cli quality report --date $(V1_8_DATE) --output $(V1_8_REPORT_OUT)/quality_report | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('    summary_html=%s' % d['summary_html'])"
+	@echo "[5/6] backfill plan dry-run"
+	@$(PYTHON) -m robot_dh.cli backfill plan --from-date $(V1_8_FROM) --to-date $(V1_8_TO) --dry-run | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('    plan_id=%s  task_count=%d  dry_run=%s' % (d['plan_id'], d['task_count'], d['dry_run']))"
+	@echo "[6/6] sla check"
+	@$(PYTHON) -m robot_dh.cli sla check --date $(V1_8_DATE) --policy $(V1_8_SLA_POLICY) --dry-run | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); checks=d.get('checks',[]); print('    checks=%d' % len(checks))" || true
+	@echo "== v1.8 warehouse smoke completed =="
+
+# v1.8 promptC：Spark local mode 可选离线宽表
+# 用法：
+#   make spark-install                                              # 装 pyspark optional extra
+#   make spark-build-quality-ads-local                              # 跑 SparkSQL local mode
+#       SPARK_INPUT=...   warehouse export 根目录，file:// 或本地路径（必填）
+#       SPARK_OUTPUT=...  parquet 输出根目录（必填）
+#       SPARK_DATE=YYYY-MM-DD  默认 V1_8_DATE
+#   make spark-test                                                 # 跑 spark optional 测试
+
+SPARK_INPUT  ?= file://$(abspath $(V1_8_REPORT_OUT))/export
+SPARK_OUTPUT ?= file://$(abspath $(V1_8_REPORT_OUT))/spark_ads
+SPARK_DATE   ?= $(V1_8_DATE)
+
+spark-install:
+	@$(PIP) install -e ".[spark]"
+
+spark-build-quality-ads-local:
+	@$(PYTHON) -m robot_dh.cli spark build-quality-ads \
+		--input "$(SPARK_INPUT)" \
+		--output "$(SPARK_OUTPUT)" \
+		--date $(SPARK_DATE)
+
+spark-test:
+	@$(PYTEST) tests/test_spark_quality_ads_optional.py -q
+
+# ============================================================
+# v1.9 AI Inference Data Plane Lite（本地，不依赖 GPU / 远端）
+# ============================================================
+.PHONY: model-init model-list infer-mock-local infer-benchmark-local distill-build-local v1-9-inference-smoke
+
+V1_9_RUN        ?= runs/v1_9_smoke
+V1_9_INPUT      ?= file://$(abspath $(V1_9_RUN))/ml-ready/demo/v1
+V1_9_INFER_OUT  ?= file://$(abspath $(V1_9_RUN))/infer/captions/demo/v1
+V1_9_DISTILL_OUT?= file://$(abspath $(V1_9_RUN))/distill/demo/v1
+V1_9_BENCH_OUT  ?= file://$(abspath $(V1_9_RUN))/benchmark/mock-captioner
+V1_9_DATE       ?= $(shell date -u +%F)
+V1_9_MODEL      ?= mock-captioner-v1
+
+model-init:
+	@$(PYTHON) -m robot_dh.cli model register --config configs/model_registry.yaml
+
+model-list:
+	@$(PYTHON) -m robot_dh.cli model list
+
+# 生成一个最小 ML-ready parquet 供本地推理使用。
+$(V1_9_RUN)/ml-ready/demo/v1/train.parquet:
+	@mkdir -p $(V1_9_RUN)/ml-ready/demo/v1
+	@$(PYTHON) -c "import pyarrow as pa, pyarrow.parquet as pq; pq.write_table(pa.table({'episode_id':[f'e{i}' for i in range(20)],'quality_score':[0.5+0.02*i for i in range(20)]}), '$(V1_9_RUN)/ml-ready/demo/v1/train.parquet')"
+
+infer-mock-local: $(V1_9_RUN)/ml-ready/demo/v1/train.parquet model-init
+	@$(PYTHON) -m robot_dh.cli infer run --input "$(V1_9_INPUT)" --model-id $(V1_9_MODEL) \
+		--output "$(V1_9_INFER_OUT)" --batch-size 8 --max-workers 4
+
+infer-benchmark-local: $(V1_9_RUN)/ml-ready/demo/v1/train.parquet model-init
+	@$(PYTHON) -m robot_dh.cli infer benchmark --input "$(V1_9_INPUT)" --model-id $(V1_9_MODEL) \
+		--output "$(V1_9_BENCH_OUT)" --concurrency 1,2,4 --batch-size 8,16 --limit 20
+
+distill-build-local: infer-mock-local
+	@$(PYTHON) -m robot_dh.cli distill build --teacher-output "$(V1_9_INFER_OUT)" \
+		--format instruction_tuning --output "$(V1_9_DISTILL_OUT)" --split 0.8,0.1,0.1
+
+v1-9-inference-smoke: $(V1_9_RUN)/ml-ready/demo/v1/train.parquet
+	@echo "== v1.9 inference smoke =="
+	@echo "[1/7] model register"
+	@$(PYTHON) -m robot_dh.cli model register --config configs/model_registry.yaml | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('    registered=%d backend=%s' % (len(d['registered']), d['backend']))"
+	@echo "[2/7] model list"
+	@$(PYTHON) -m robot_dh.cli model list | python3 -c "import sys,json; print('    models=%d' % len(json.loads(sys.stdin.read())))"
+	@echo "[3/7] infer run $(V1_9_MODEL)"
+	@$(PYTHON) -m robot_dh.cli infer run --input "$(V1_9_INPUT)" --model-id $(V1_9_MODEL) --output "$(V1_9_INFER_OUT)" --batch-size 8 --max-workers 4 | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('    status=%s total=%s sps=%s' % (d['status'], d['report']['total_samples'], d['report']['samples_per_sec']))"
+	@echo "[4/7] infer benchmark"
+	@$(PYTHON) -m robot_dh.cli infer benchmark --input "$(V1_9_INPUT)" --model-id $(V1_9_MODEL) --output "$(V1_9_BENCH_OUT)" --concurrency 1,2 --batch-size 8,16 --limit 20 | python3 -c "import sys,json; print('    combos=%d' % json.loads(sys.stdin.read())['combo_count'])"
+	@echo "[5/7] distill build"
+	@$(PYTHON) -m robot_dh.cli distill build --teacher-output "$(V1_9_INFER_OUT)" --format instruction_tuning --output "$(V1_9_DISTILL_OUT)" --split 0.8,0.1,0.1 | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('    num_total=%s train=%s' % (d['num_total'], d['num_train']))"
+	@echo "[6/7] warehouse build inference layer"
+	@$(PYTHON) -m robot_dh.cli warehouse build --layers inference --date $(V1_9_DATE) | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('    status=%s layers=%s' % (d['status'], d['layers']))"
+	@echo "[7/7] quality summary (inference metrics)"
+	@$(PYTHON) -m robot_dh.cli quality summary --date $(V1_9_DATE) | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('    inference_job_count=%s inference_success_rate=%s' % (d.get('inference_job_count'), d.get('inference_success_rate')))"
+	@echo "== v1.9 inference smoke completed =="

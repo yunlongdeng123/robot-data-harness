@@ -115,8 +115,8 @@ argo/
 
 ## v1.6 Argo 日志归档（来自 robot-dh-infra 的需求）
 
-需求来源：[`docs/v1_6_argo_log_archive_request.md`](../docs/v1_6_argo_log_archive_request.md)。
-完成回执：[`docs/v1_6_argo_log_archive_handoff.md`](../docs/v1_6_argo_log_archive_handoff.md)。
+需求来源：[`docs/history/v1_6_argo_log_archive_request.md`](../docs/history/v1_6_argo_log_archive_request.md)。
+完成回执：[`docs/history/v1_6_argo_log_archive_handoff.md`](../docs/history/v1_6_argo_log_archive_handoff.md)。
 
 工作流：
 
@@ -151,7 +151,7 @@ argo/
 
 注意：
 
-- 对象路径模板与远端 robot-dh-infra 的 lifecycle 规则强耦合，**任何改动**都要先同步给 `docs/v1_6_argo_log_archive_request.md` 那边。
+- 对象路径模板与远端 robot-dh-infra 的 lifecycle 规则强耦合，**任何改动**都要先同步给 `docs/history/v1_6_argo_log_archive_request.md` 那边。
 - 不要把 `accessKey` / `secretKey` 直接写进 ConfigMap；`argo_apply_log_archive.sh` 永远引用 `argo/robot-dh-v1-6-secrets`。
 - `endpoint` 由脚本从 `robot-dh/robot-dh-v1-6-secrets.ROBOT_DH_S3_ENDPOINT_URL` 推断 host:port + insecure 字段；脚本会拒绝 127.0.0.1/localhost。
 

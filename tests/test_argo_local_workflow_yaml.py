@@ -193,3 +193,42 @@ def test_devscale_etl_resource_limits_are_within_kind_budget() -> None:
         if mem.endswith("Gi"):
             gi = float(mem.rstrip("Gi"))
             assert gi <= 4.0, f"{name}: memory limit {mem} > 4Gi (kind budget)"
+
+
+def test_devscale_tail_dag_runs_v18_warehouse_steps() -> None:
+    """v1.7 → v1.8 集成守门：argo-sync 之后必须串联 4 个 v1.8 step，
+    archive-logs-index 必须等 quality-report + sla-check 都结束。
+
+    这条断言是 v1.7 → v1.8 端到端故事的硬契约：plvvj 跑完同一条 DAG 直接产出
+    DWS / ADS + 质检 / SLA 报告，不能再退化成"等人手 trigger warehouse build"。
+    """
+    doc = _load(DEVSCALE_TPL)
+    templates = _templates_by_name(doc)
+    tasks = {t["name"]: t for t in templates["main"]["dag"]["tasks"]}
+    for name in ("warehouse-init", "warehouse-build", "quality-report", "sla-check"):
+        assert name in tasks, f"v1.8 step {name!r} missing from devscale DAG"
+        assert name in templates, f"v1.8 step template {name!r} missing"
+
+    assert tasks["warehouse-init"]["depends"] == "argo-sync"
+    assert tasks["warehouse-build"]["depends"] == "warehouse-init"
+    assert tasks["quality-report"]["depends"] == "warehouse-build"
+    assert tasks["sla-check"]["depends"] == "warehouse-build"
+    assert "quality-report" in tasks["archive-logs-index"]["depends"]
+    assert "sla-check" in tasks["archive-logs-index"]["depends"]
+
+
+def test_devscale_v18_steps_have_correct_cli_shape() -> None:
+    """v1.8 收尾段必须调对的 CLI 命令；脚本里换 path 容易翻车，硬断言锁死。"""
+    doc = _load(DEVSCALE_TPL)
+    templates = _templates_by_name(doc)
+    expected_substrings = {
+        "warehouse-init":   "robot_dh.cli warehouse init",
+        "warehouse-build":  "robot_dh.cli warehouse build",
+        "quality-report":   "robot_dh.cli quality report",
+        "sla-check":        "robot_dh.cli sla check",
+    }
+    for step, needle in expected_substrings.items():
+        ctn = templates[step].get("container") or {}
+        args_text = "\n".join(ctn.get("args") or [])
+        assert needle in args_text, f"{step}: expected CLI invocation `{needle}` in args"
+        assert ctn.get("command") == ["/bin/bash", "-lc"], f"{step}: bash -lc 强约束"

@@ -1,0 +1,25 @@
+# v1.8 warehouse 配置。
+#
+# 字段含义：
+#   schema                远端 PostgreSQL schema 名（与 infra 项目对齐）；SQLite 测试时被忽略。
+#   output_root           warehouse export 默认根目录；支持 file:// / s3://；
+#                         可被 --output 命令行参数覆盖。
+#   default_layers        warehouse build 默认层级；可被 --layers 命令行参数覆盖。
+#   sql_root              warehouse/sql 根目录；通常用相对仓库根的路径。
+#   timezone              dt 列计算用的时区，默认 UTC。
+#
+# 环境变量覆盖（优先级高于 yaml）：
+#   ROBOT_DH_WAREHOUSE_SCHEMA / ROBOT_DH_WAREHOUSE_OUTPUT_ROOT / ROBOT_DH_WAREHOUSE_SQL_ROOT
+#
+# 注意：本文件**不**包含任何凭据；连接信息走 ROBOT_DH_DB_URI / ROBOT_DH_S3_* 等 env。
+
+warehouse:
+  schema: public
+  output_root: file:///tmp/robot-dh/warehouse-export
+  default_layers:
+    - dim
+    - fact
+    - dws
+    - ads
+  sql_root: warehouse/sql
+  timezone: UTC

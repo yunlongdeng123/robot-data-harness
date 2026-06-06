@@ -1,0 +1,4 @@
+# v1.9 推理 benchmark 默认网格（可被 robot-dh infer benchmark 命令行覆盖）。
+concurrency: [1, 2, 4, 8]
+batch_size: [8, 16, 32]
+limit: 200

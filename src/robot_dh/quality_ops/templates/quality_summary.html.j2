@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>robot-dh v1.8 Quality Summary - {{ summary.dt }}</title>
+  <style>
+    body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; margin: 24px; color: #222; }
+    h1 { margin: 0 0 12px; font-size: 22px; }
+    h2 { margin: 24px 0 8px; font-size: 16px; color: #444; }
+    .meta { color: #888; font-size: 12px; margin-bottom: 16px; }
+    .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+    .kpi { background: #f6f8fa; border: 1px solid #e6e9ed; border-radius: 6px; padding: 10px 14px; }
+    .kpi .label { font-size: 11px; color: #6a737d; text-transform: uppercase; letter-spacing: 0.04em; }
+    .kpi .value { font-size: 20px; margin-top: 4px; font-weight: 600; }
+    .alert-OK { color: #1f883d; }
+    .alert-WARN { color: #bf8700; }
+    .alert-CRITICAL { color: #cf222e; }
+    table { border-collapse: collapse; width: 100%; margin-top: 8px; font-size: 13px; }
+    th, td { border: 1px solid #e6e9ed; padding: 6px 10px; text-align: left; vertical-align: top; }
+    th { background: #f6f8fa; color: #444; }
+    tr:nth-child(even) td { background: #fbfbfb; }
+    .empty { color: #999; font-style: italic; }
+    code { background: #f6f8fa; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>robot-dh v1.8 Quality Summary <span class="alert-{{ summary.alert_level }}">[{{ summary.alert_level }}]</span></h1>
+  <div class="meta">dt = {{ summary.dt }} &middot; 数据集数 = {{ summary.dataset_count }} &middot; 生成时间 {{ generated_at }}</div>
+
+  <div class="kpis">
+    <div class="kpi"><div class="label">QC 通过率</div><div class="value">{{ fmt_rate(summary.qc_pass_rate) }}</div></div>
+    <div class="kpi"><div class="label">ETL 成功率</div><div class="value">{{ fmt_rate(summary.etl_success_rate) }}</div></div>
+    <div class="kpi"><div class="label">Workflow 成功率</div><div class="value">{{ fmt_rate(summary.workflow_success_rate) }}</div></div>
+    <div class="kpi"><div class="label">p95 step duration</div><div class="value">{{ fmt_seconds(summary.p95_step_duration_sec) }}</div></div>
+    <div class="kpi"><div class="label">ML-ready rows</div><div class="value">{{ fmt_int(summary.ml_ready_rows) }}</div></div>
+    <div class="kpi"><div class="label">raw bytes</div><div class="value">{{ fmt_bytes(summary.raw_bytes) }}</div></div>
+    <div class="kpi"><div class="label">dwd bytes</div><div class="value">{{ fmt_bytes(summary.dwd_bytes) }}</div></div>
+    <div class="kpi"><div class="label">stale heartbeat</div><div class="value">{{ fmt_int(summary.stale_heartbeat_count) }}</div></div>
+  </div>
+
+  <h2>Top {{ summary.top_failed_rules|length }} 失败规则</h2>
+  {% if summary.top_failed_rules %}
+  <table>
+    <thead>
+      <tr>
+        <th>rule_id</th><th>severity</th><th>contract_id</th><th>family</th>
+        <th>fail / run</th><th>fail_rate</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in summary.top_failed_rules %}
+      <tr>
+        <td><code>{{ r.rule_id }}</code></td>
+        <td>{{ r.severity }}</td>
+        <td>{{ r.contract_id }}</td>
+        <td>{{ r.dataset_family or '-' }}</td>
+        <td>{{ r.fail_count }} / {{ r.run_count }}</td>
+        <td>{{ fmt_rate(r.fail_rate) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">当日没有失败规则。</div>
+  {% endif %}
+
+  <h2>数据集质量看板</h2>
+  {% if summary.dashboards %}
+  <table>
+    <thead>
+      <tr>
+        <th>dataset_id</th><th>version</th><th>family</th><th>overall</th>
+        <th>quality_score</th><th>qc</th><th>etl</th><th>wf</th>
+        <th>top_failed_rule</th><th>alert</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for d in summary.dashboards %}
+      <tr>
+        <td>{{ d.dataset_id }}</td>
+        <td>{{ d.version }}</td>
+        <td>{{ d.dataset_family or '-' }}</td>
+        <td>{{ d.overall_status }}</td>
+        <td>{{ fmt_score(d.quality_score) }}</td>
+        <td>{{ fmt_rate(d.qc_pass_rate) }}</td>
+        <td>{{ fmt_rate(d.etl_success_rate) }}</td>
+        <td>{{ fmt_rate(d.workflow_success_rate) }}</td>
+        <td>{{ d.top_failed_rule or '-' }}{% if d.top_failed_rule_count %} ({{ d.top_failed_rule_count }}){% endif %}</td>
+        <td class="alert-{{ d.alert_level or 'OK' }}">{{ d.alert_level or 'OK' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">当日没有 ads_quality_dashboard 数据。</div>
+  {% endif %}
+
+  <h2>Workflow Ops</h2>
+  {% if summary.workflow_ops %}
+  <table>
+    <thead>
+      <tr>
+        <th>workflow_type</th><th>count</th><th>success</th><th>failed</th>
+        <th>success_rate</th><th>p95</th><th>alert</th><th>reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for w in summary.workflow_ops %}
+      <tr>
+        <td>{{ w.workflow_type }}</td>
+        <td>{{ w.workflow_count or 0 }}</td>
+        <td>{{ w.success_count or 0 }}</td>
+        <td>{{ w.failed_count or 0 }}</td>
+        <td>{{ fmt_rate(w.success_rate) }}</td>
+        <td>{{ fmt_seconds(w.p95_duration_sec) }}</td>
+        <td class="alert-{{ w.alert_level or 'OK' }}">{{ w.alert_level or 'OK' }}</td>
+        <td>{{ w.alert_reason or '-' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">当日没有 ads_workflow_ops_dashboard 数据。</div>
+  {% endif %}
+
+  <h2>Archive Log Links（前 30 条）</h2>
+  {% if summary.archive_log_uris %}
+  <ul>
+    {% for uri in summary.archive_log_uris[:30] %}
+    <li><code>{{ uri }}</code></li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <div class="empty">当日没有 archive log。</div>
+  {% endif %}
+</body>
+</html>

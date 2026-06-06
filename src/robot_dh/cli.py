@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -47,8 +48,48 @@ from robot_dh.sharding.shard_runner import run_shard
 from robot_dh.warehouse.service import WarehouseService
 
 
+def _json_default(obj: object) -> object:
+    """JSON 序列化兜底：datetime / date / time / Decimal / Path / set 全部转字符串。"""
+    import datetime as _dt
+    import decimal as _dec
+    from pathlib import Path as _Path
+
+    if isinstance(obj, (_dt.datetime, _dt.date, _dt.time)):
+        return obj.isoformat()
+    if isinstance(obj, _dec.Decimal):
+        return float(obj)
+    if isinstance(obj, _Path):
+        return str(obj)
+    if isinstance(obj, (set, frozenset)):
+        return sorted(obj)
+    if isinstance(obj, bytes):
+        return obj.decode("utf-8", errors="replace")
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 def _print_json(payload: object) -> None:
-    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=_json_default))
+
+
+def _parse_iso(value: object) -> "datetime | None":
+    """把 ISO 字符串安全转 datetime；None / 解析失败一律退回 None。
+
+    ContractReport 的 ``started_at`` / ``finished_at`` 是 ``utcnow_iso()`` 生成的字符串，
+    PG 落库需要 datetime；统一在 CLI 边界做一次解析，避免上层 service 再嗅探类型。
+    """
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        text = value.strip().rstrip("Z")
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    return None
 
 
 def _print_dataset_rows(rows: list[object]) -> None:
@@ -506,6 +547,222 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Scan but do not write to DB / move files",
     )
+
+    # ---------------- v1.8: warehouse / quality / backfill / sla ----------------
+
+    warehouse_parser = subparsers.add_parser("warehouse", help="v1.8 warehouse metrics 层")
+    warehouse_subparsers = warehouse_parser.add_subparsers(dest="warehouse_command")
+
+    warehouse_init_parser = warehouse_subparsers.add_parser(
+        "init", help="检查 v1.8 表是否齐全（可选 --apply-ddl 在 SQLite/本地建简化表）"
+    )
+    warehouse_init_parser.add_argument("--config", type=Path, default=Path("configs/warehouse.yaml"))
+    warehouse_init_parser.add_argument(
+        "--apply-ddl",
+        action="store_true",
+        help="对远端 PostgreSQL 不推荐；本地 SQLite 测试可以用",
+    )
+
+    warehouse_build_parser = warehouse_subparsers.add_parser(
+        "build", help="按日期范围执行 dim/fact/dws/ads build"
+    )
+    warehouse_build_parser.add_argument("--config", type=Path, default=Path("configs/warehouse.yaml"))
+    warehouse_build_parser.add_argument("--date", type=str, default=None, help="单日 build；YYYY-MM-DD")
+    warehouse_build_parser.add_argument("--from-date", type=str, default=None)
+    warehouse_build_parser.add_argument("--to-date", type=str, default=None)
+    warehouse_build_parser.add_argument(
+        "--layers",
+        type=str,
+        default=None,
+        help="逗号分隔，默认 'dim,fact,dws,ads'",
+    )
+    warehouse_build_parser.add_argument("--dry-run", action="store_true")
+    warehouse_build_parser.add_argument("--force", action="store_true")
+    warehouse_build_parser.add_argument(
+        "--output-root",
+        type=str,
+        default=None,
+        help="warehouse build 报告目录（不写库），支持 file:// / 本地路径",
+    )
+
+    warehouse_query_parser = warehouse_subparsers.add_parser("query", help="查询 v1.8 表")
+    warehouse_query_parser.add_argument("--config", type=Path, default=Path("configs/warehouse.yaml"))
+    warehouse_query_parser.add_argument("--table", type=str, required=True)
+    warehouse_query_parser.add_argument("--limit", type=int, default=20)
+    warehouse_query_parser.add_argument("--where", type=str, default=None)
+    warehouse_query_parser.add_argument("--order-by", type=str, default=None)
+    warehouse_query_parser.add_argument("--output", type=str, choices=("json", "table", "csv"), default="table")
+
+    warehouse_export_parser = warehouse_subparsers.add_parser("export", help="导出某个 table 到 parquet/csv/json")
+    warehouse_export_parser.add_argument("--config", type=Path, default=Path("configs/warehouse.yaml"))
+    warehouse_export_parser.add_argument("--table", type=str, required=True)
+    warehouse_export_parser.add_argument("--date", type=str, required=True, help="标记导出日期")
+    warehouse_export_parser.add_argument("--format", type=str, choices=("parquet", "csv", "json"), default="parquet")
+    warehouse_export_parser.add_argument("--output", type=str, required=True, help="本地路径 / file:// / s3://")
+    warehouse_export_parser.add_argument("--where", type=str, default=None)
+    warehouse_export_parser.add_argument("--limit", type=int, default=10000)
+
+    warehouse_sql_parser = warehouse_subparsers.add_parser("sql", help="warehouse SQL 模板调试入口")
+    warehouse_sql_subparsers = warehouse_sql_parser.add_subparsers(dest="warehouse_sql_command")
+    warehouse_sql_run_parser = warehouse_sql_subparsers.add_parser("run", help="按 SQL 文件名执行")
+    warehouse_sql_run_parser.add_argument("--config", type=Path, default=Path("configs/warehouse.yaml"))
+    warehouse_sql_run_parser.add_argument("--file", type=str, required=True)
+    warehouse_sql_run_parser.add_argument("--dt", type=str, default=None)
+    warehouse_sql_run_parser.add_argument("--start-date", type=str, default=None)
+    warehouse_sql_run_parser.add_argument("--end-date", type=str, default=None)
+    warehouse_sql_run_parser.add_argument("--dry-run", action="store_true")
+
+    quality_parser = subparsers.add_parser("quality", help="v1.8 quality summary / report")
+    quality_subparsers = quality_parser.add_subparsers(dest="quality_command")
+
+    quality_summary_parser = quality_subparsers.add_parser("summary", help="生成一日 quality summary")
+    quality_summary_parser.add_argument("--date", type=str, default=None)
+    quality_summary_parser.add_argument("--output", type=str, choices=("json", "table"), default="json")
+
+    quality_report_parser = quality_subparsers.add_parser("report", help="渲染 HTML / JSON / CSV report")
+    quality_report_parser.add_argument("--date", type=str, default=None)
+    quality_report_parser.add_argument("--output", type=Path, required=True, help="目标目录")
+
+    backfill_parser = subparsers.add_parser("backfill", help="v1.8 backfill plan / run / status")
+    backfill_subparsers = backfill_parser.add_subparsers(dest="backfill_command")
+
+    backfill_plan_parser = backfill_subparsers.add_parser("plan", help="生成 backfill plan + 写 backfill_*")
+    backfill_plan_parser.add_argument("--from-date", type=str, required=True)
+    backfill_plan_parser.add_argument("--to-date", type=str, required=True)
+    backfill_plan_parser.add_argument("--dataset", type=str, default=None)
+    backfill_plan_parser.add_argument("--version", type=str, default=None)
+    backfill_plan_parser.add_argument("--phase", type=str, default=None)
+    backfill_plan_parser.add_argument("--reason", type=str, default=None)
+    backfill_plan_parser.add_argument("--status-filter", type=str, default="FAILED,WARN,ERROR,FAIL")
+    backfill_plan_parser.add_argument("--dry-run", action="store_true")
+    backfill_plan_parser.add_argument("--output", type=Path, default=None, help="可选；写 plan.json + plan.md")
+
+    backfill_run_parser = backfill_subparsers.add_parser("run", help="对 plan 内 task 执行（默认仅打印命令）")
+    backfill_run_parser.add_argument("--plan-id", type=str, required=True)
+    backfill_run_parser.add_argument("--max-parallel", type=int, default=2)
+    backfill_run_parser.add_argument("--execute", action="store_true")
+    backfill_run_parser.add_argument("--dry-run", action="store_true")
+
+    backfill_status_parser = backfill_subparsers.add_parser("status", help="查询某个 plan 的 task 状态")
+    backfill_status_parser.add_argument("--plan-id", type=str, required=True)
+
+    sla_parser = subparsers.add_parser("sla", help="v1.8 SLA check / report")
+    sla_subparsers = sla_parser.add_subparsers(dest="sla_command")
+
+    sla_check_parser = sla_subparsers.add_parser("check", help="按 policy 跑一次校验并写 sla_checks")
+    sla_check_parser.add_argument("--date", type=str, default=None)
+    sla_check_parser.add_argument("--policy", type=Path, default=Path("configs/sla_policies.yaml"))
+    sla_check_parser.add_argument("--dry-run", action="store_true", help="不写 sla_policies / sla_checks")
+
+    sla_report_parser = sla_subparsers.add_parser("report", help="生成 HTML / JSON / CSV SLA report")
+    sla_report_parser.add_argument("--date", type=str, default=None)
+    sla_report_parser.add_argument("--policy", type=Path, default=Path("configs/sla_policies.yaml"))
+    sla_report_parser.add_argument("--output", type=Path, required=True)
+
+    # v1.8 promptC：Spark local mode 离线宽表，仅可选模块
+    spark_parser = subparsers.add_parser(
+        "spark", help="v1.8 promptC：Spark local mode 离线数仓宽表（pyspark optional extra）"
+    )
+    spark_subparsers = spark_parser.add_subparsers(dest="spark_command")
+
+    spark_build_quality_ads = spark_subparsers.add_parser(
+        "build-quality-ads",
+        help="读取 warehouse export 的 4 张 parquet，跑 SparkSQL，产出 DWS + ADS parquet",
+    )
+    spark_build_quality_ads.add_argument(
+        "--input",
+        type=str,
+        required=True,
+        help="warehouse export 根目录，file:// 或本地路径",
+    )
+    spark_build_quality_ads.add_argument(
+        "--output",
+        type=str,
+        required=True,
+        help="parquet 输出根目录，file:// 或本地路径",
+    )
+    spark_build_quality_ads.add_argument(
+        "--date", type=str, required=True, help="YYYY-MM-DD"
+    )
+    spark_build_quality_ads.add_argument(
+        "--driver-memory",
+        type=str,
+        default=None,
+        help="Spark driver memory，例如 4g；不传时使用 ROBOT_DH_SPARK_DRIVER_MEMORY 或 2g",
+    )
+
+    # ============================================================
+    # v1.9 AI Inference Data Plane Lite：model / infer / distill
+    # ============================================================
+    model_parser = subparsers.add_parser("model", help="v1.9 模型注册表")
+    model_subparsers = model_parser.add_subparsers(dest="model_command")
+    model_register = model_subparsers.add_parser("register", help="注册单个模型或从 config 批量注册")
+    model_register.add_argument("--config", type=str, default=None, help="model_registry.yaml；提供时批量注册")
+    model_register.add_argument("--model-id", type=str, default=None)
+    model_register.add_argument("--model-name", type=str, default=None)
+    model_register.add_argument("--model-type", type=str, default=None, help="caption/embedding/anomaly_scorer/vlm/llm/mock")
+    model_register.add_argument("--backend", type=str, default=None, help="mock/local_cpu/openai_compatible/autodl_worker/http_json")
+    model_register.add_argument("--endpoint-url", type=str, default=None)
+    model_register.add_argument("--max-batch-size", type=int, default=32)
+    model_register.add_argument("--timeout-sec", type=int, default=60)
+    model_register.add_argument("--status", type=str, default="ACTIVE")
+    model_register.add_argument("--local-only", action="store_true", help="只写本地 JSON registry")
+    model_subparsers.add_parser("list", help="列出已注册模型")
+    model_show = model_subparsers.add_parser("show", help="显示单个模型")
+    model_show.add_argument("--model-id", type=str, required=True)
+    model_health = model_subparsers.add_parser("health", help="检查模型 backend 健康")
+    model_health.add_argument("--model-id", type=str, required=True)
+
+    infer_parser = subparsers.add_parser("infer", help="v1.9 批量推理")
+    infer_subparsers = infer_parser.add_subparsers(dest="infer_command")
+    infer_run = infer_subparsers.add_parser("run", help="对输入数据集跑批量推理")
+    infer_run.add_argument("--input", type=str, required=True, help="ML-ready / DWD 输入根 URI（file:// 或 s3://）")
+    infer_run.add_argument("--model-id", type=str, required=True)
+    infer_run.add_argument("--output", type=str, required=True, help="推理输出根 URI")
+    infer_run.add_argument("--task-type", type=str, default=None, help="caption/embedding/anomaly_score；默认按 model_type 推导")
+    infer_run.add_argument("--split", type=str, default="all", help="train|val|test|all")
+    infer_run.add_argument("--batch-size", type=int, default=None)
+    infer_run.add_argument("--max-workers", type=int, default=4)
+    infer_run.add_argument("--limit", type=int, default=None)
+    infer_run.add_argument("--retry", type=int, default=0)
+    infer_run.add_argument("--timeout-sec", type=int, default=None)
+    infer_run.add_argument("--fail-fast", action="store_true")
+    infer_run.add_argument("--dataset-id", type=str, default=None)
+    infer_run.add_argument("--version", type=str, default=None)
+    infer_run.add_argument("--record-to-registry", action="store_true", help="DB 可用时回流 PG（默认即回流）")
+    infer_run.add_argument("--local-only", action="store_true", help="只走本地，不写 PG")
+    infer_list = infer_subparsers.add_parser("list", help="列出推理任务（需 DB）")
+    infer_list.add_argument("--limit", type=int, default=50)
+    infer_show = infer_subparsers.add_parser("show", help="显示单个推理任务（需 DB）")
+    infer_show.add_argument("--job-id", type=str, required=True)
+    infer_retry = infer_subparsers.add_parser("retry", help="对失败样本重新推理（读 failed_samples.parquet）")
+    infer_retry.add_argument("--job-output", type=str, required=True, help="原 job 的 output 根 URI（含 failed_samples.parquet）")
+    infer_retry.add_argument("--model-id", type=str, required=True)
+    infer_retry.add_argument("--output", type=str, required=True, help="重试输出根 URI")
+    infer_retry.add_argument("--retry", type=int, default=2)
+    infer_retry.add_argument("--local-only", action="store_true")
+    infer_report = infer_subparsers.add_parser("report", help="读取并打印 inference_report.json")
+    infer_report.add_argument("--job-output", type=str, required=True, help="job output 根 URI")
+    infer_bench = infer_subparsers.add_parser("benchmark", help="对 concurrency×batch_size 网格压测")
+    infer_bench.add_argument("--input", type=str, required=True)
+    infer_bench.add_argument("--model-id", type=str, required=True)
+    infer_bench.add_argument("--output", type=str, required=True)
+    infer_bench.add_argument("--concurrency", type=str, default="1,2,4,8", help="逗号分隔，如 1,2,4")
+    infer_bench.add_argument("--batch-size", type=str, default="8,16,32", help="逗号分隔，如 8,16")
+    infer_bench.add_argument("--limit", type=int, default=200)
+    infer_bench.add_argument("--local-only", action="store_true")
+
+    distill_parser = subparsers.add_parser("distill", help="v1.9 蒸馏数据集 builder")
+    distill_subparsers = distill_parser.add_subparsers(dest="distill_command")
+    distill_build = distill_subparsers.add_parser("build", help="从 teacher 推理输出蒸馏训练集")
+    distill_build.add_argument("--teacher-output", type=str, required=True, help="teacher job output 根 URI")
+    distill_build.add_argument("--format", type=str, required=True, help="instruction_tuning/caption_sft/embedding_pairs/anomaly_detection")
+    distill_build.add_argument("--output", type=str, required=True, help="蒸馏输出根 URI")
+    distill_build.add_argument("--split", type=str, default="0.8,0.1,0.1", help="train,val,test 比例")
+    distill_build.add_argument("--teacher-model", type=str, default=None)
+    distill_build.add_argument("--dataset-id", type=str, default=None)
+    distill_build.add_argument("--version", type=str, default=None)
+    distill_build.add_argument("--local-only", action="store_true")
 
     return parser
 
@@ -1022,10 +1279,13 @@ def _main_impl(argv: list[str] | None = None) -> int:
                     version=report.version,
                     dataset_family=report.dataset_family,
                     dataset_uri=report.dataset_uri,
+                    started_at=_parse_iso(report.started_at),
+                    finished_at=_parse_iso(report.finished_at),
                     duration_sec=report.duration_sec,
                     metrics=report.metrics,
                     failed_rules=report.failed_rules,
                     warning_rules=report.warning_rules,
+                    all_rules=[r.to_dict() for r in report.rules],
                     artifacts_uri=artifacts.get("report_uri"),
                 )
                 wh_plat.record_asset_profile(
@@ -1394,6 +1654,242 @@ def _main_impl(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 0
 
+    if args.command == "warehouse":
+        from robot_dh.warehouse_metrics import (
+            ExportManifest,
+            WarehouseBuilder,
+            WarehouseExporter,
+            WarehouseQueryService,
+            load_warehouse_metrics_config,
+            parse_date_range,
+        )
+        from robot_dh.warehouse_metrics.query import QueryRequest, WarehouseTableNotKnownError
+        from robot_dh.warehouse_metrics.sql_runner import SqlTemplateRunner
+
+        if args.warehouse_command == "init":
+            cfg = load_warehouse_metrics_config(config_path=args.config)
+            report = WarehouseBuilder(config=cfg).init_check(apply_ddl=args.apply_ddl)
+            _print_json(report.to_dict())
+            return 0 if not report.missing_tables else 1
+        if args.warehouse_command == "build":
+            cfg = load_warehouse_metrics_config(
+                config_path=args.config,
+                output_root=args.output_root,
+            )
+            window = parse_date_range(
+                date_=args.date, from_date=args.from_date, to_date=args.to_date,
+            )
+            layers = None
+            if args.layers:
+                layers = [l.strip() for l in args.layers.split(",") if l.strip()]
+            builder = WarehouseBuilder(config=cfg)
+            report = builder.build(window=window, layers=layers, dry_run=args.dry_run, force=args.force)
+            _print_json(report.to_dict())
+            if args.output_root:
+                from urllib.parse import urlparse
+                parsed = urlparse(args.output_root)
+                if parsed.scheme in ("", "file"):
+                    report_path = Path(parsed.path if parsed.scheme == "file" else args.output_root)
+                    report_path.mkdir(parents=True, exist_ok=True)
+                    (report_path / "warehouse_build_report.json").write_text(
+                        json.dumps(report.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8",
+                    )
+                    manifest = {
+                        "build_window": window.to_dict(),
+                        "layers": list(report.layers),
+                        "backend": report.backend,
+                        "schema": report.schema,
+                        "status": report.status,
+                    }
+                    (report_path / "_manifest.json").write_text(
+                        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8",
+                    )
+            return 0 if report.status != "fail" else 1
+        if args.warehouse_command == "query":
+            cfg = load_warehouse_metrics_config(config_path=args.config)
+            svc = WarehouseQueryService(config=cfg)
+            try:
+                rows = svc.query(QueryRequest(
+                    table=args.table, limit=args.limit, where=args.where, order_by=args.order_by,
+                ))
+            except WarehouseTableNotKnownError as err:
+                print(f"error: {err}")
+                return 1
+            if args.output == "json":
+                _print_json(rows)
+            elif args.output == "csv":
+                import csv as _csv, sys as _sys
+                keys: list[str] = []
+                seen: set[str] = set()
+                for r in rows:
+                    for k in r.keys():
+                        if k not in seen:
+                            seen.add(k)
+                            keys.append(k)
+                writer = _csv.DictWriter(_sys.stdout, fieldnames=keys or ["empty"])
+                writer.writeheader()
+                for r in rows:
+                    writer.writerow({k: r.get(k) for k in keys})
+            else:
+                if not rows:
+                    print("(empty result)")
+                    return 0
+                cols = list(rows[0].keys())
+                print("\t".join(cols))
+                for r in rows:
+                    print("\t".join("" if r.get(c) is None else str(r.get(c)) for c in cols))
+            return 0
+        if args.warehouse_command == "export":
+            cfg = load_warehouse_metrics_config(config_path=args.config)
+            svc = WarehouseQueryService(config=cfg)
+            try:
+                rows = svc.query(QueryRequest(
+                    table=args.table, limit=args.limit, where=args.where,
+                ))
+            except WarehouseTableNotKnownError as err:
+                print(f"error: {err}")
+                return 1
+            manifest = WarehouseExporter().export(
+                rows=rows, table=args.table, dt=args.date,
+                output_uri=args.output, format=args.format, source_tables=[args.table],
+            )
+            _print_json(manifest.to_dict())
+            return 0
+        if args.warehouse_command == "sql" and getattr(args, "warehouse_sql_command", None) == "run":
+            cfg = load_warehouse_metrics_config(config_path=args.config)
+            from robot_dh.registry import get_engine, init_db, resolve_db_uri
+            resolved = resolve_db_uri(None)
+            engine = get_engine(resolved)
+            if engine.dialect.name == "sqlite":
+                init_db(resolved)
+                from robot_dh.warehouse.models import ensure_lake_tables
+                ensure_lake_tables(engine)
+            runner = SqlTemplateRunner(engine=engine, sql_root=cfg.sql_root, default_params={"schema": cfg.schema})
+            params = {"schema": cfg.schema}
+            if args.dt:
+                params["start_date"] = args.dt
+                params["end_date"] = args.dt
+            if args.start_date:
+                params["start_date"] = args.start_date
+            if args.end_date:
+                params["end_date"] = args.end_date
+            result = runner.execute(args.file, params=params, dry_run=args.dry_run)
+            _print_json(result.to_dict())
+            return 0 if result.status != "error" else 1
+        parser.print_help()
+        return 0
+
+    if args.command == "quality":
+        from robot_dh.quality_ops import (
+            QualityReportRenderer,
+            build_quality_summary,
+            render_quality_report,
+        )
+
+        if args.quality_command == "summary":
+            summary = build_quality_summary(date_=args.date)
+            if args.output == "json":
+                _print_json(summary.to_dict())
+            else:
+                d = summary.to_dict()
+                print(f"date={d['dt']}  alert={d['alert_level']}  dataset_count={d['dataset_count']}")
+                print(f"qc_pass_rate={d['qc_pass_rate']}  etl_success_rate={d['etl_success_rate']}  workflow_success_rate={d['workflow_success_rate']}")
+                print(f"ml_ready_rows={d['ml_ready_rows']}  raw_bytes={d['raw_bytes']}  dwd_bytes={d['dwd_bytes']}")
+                print(f"top_failed_rules={[r['rule_id'] for r in d['top_failed_rules']]}")
+            return 0 if summary.alert_level != "CRITICAL" else 1
+        if args.quality_command == "report":
+            artifacts = render_quality_report(date_=args.date, output_dir=args.output)
+            _print_json(artifacts.to_dict())
+            return 0
+        parser.print_help()
+        return 0
+
+    if args.command == "backfill":
+        from robot_dh.quality_ops import (
+            generate_backfill_plan,
+            run_backfill_plan,
+            show_backfill_status,
+        )
+
+        if args.backfill_command == "plan":
+            status_filter = tuple(s.strip() for s in (args.status_filter or "").split(",") if s.strip())
+            result = generate_backfill_plan(
+                from_date=args.from_date,
+                to_date=args.to_date,
+                dataset_id=args.dataset,
+                version=args.version,
+                phase=args.phase,
+                reason=args.reason,
+                status_filter=status_filter,
+                dry_run=args.dry_run,
+                output_dir=args.output,
+            )
+            _print_json(result.to_dict())
+            return 0
+        if args.backfill_command == "run":
+            result = run_backfill_plan(
+                plan_id=args.plan_id, max_parallel=args.max_parallel,
+                execute=args.execute, dry_run=args.dry_run,
+            )
+            _print_json(result.to_dict())
+            return 0 if result.failed == 0 else 1
+        if args.backfill_command == "status":
+            status = show_backfill_status(plan_id=args.plan_id)
+            _print_json(status)
+            return 0
+        parser.print_help()
+        return 0
+
+    if args.command == "sla":
+        from robot_dh.quality_ops import (
+            load_sla_policies,
+            perform_sla_checks,
+            render_sla_report,
+        )
+
+        if args.sla_command == "check":
+            policies = load_sla_policies(args.policy)
+            checks = perform_sla_checks(policies=policies, date_=args.date, persist=not args.dry_run)
+            _print_json({"dt": args.date or "today",
+                          "checks": [c.to_dict() for c in checks]})
+            return 0 if all(c.status != "FAIL" for c in checks) else 1
+        if args.sla_command == "report":
+            policies = load_sla_policies(args.policy)
+            checks = perform_sla_checks(policies=policies, date_=args.date, persist=False)
+            artifacts = render_sla_report(checks=checks, output_dir=args.output, date_=args.date)
+            _print_json(artifacts.to_dict())
+            return 0
+        parser.print_help()
+        return 0
+
+    if args.command == "spark":
+        if args.spark_command == "build-quality-ads":
+            try:
+                from robot_dh.spark_jobs import (
+                    SparkUnavailableError,
+                    build_quality_ads,
+                )
+            except Exception as err:  # 防 import 阶段炸
+                print(f"error: failed to import spark_jobs ({err!r})")
+                return 2
+            extra_conf: dict[str, str] = {}
+            if args.driver_memory:
+                extra_conf["spark.driver.memory"] = args.driver_memory
+            try:
+                result = build_quality_ads(
+                    input_uri=args.input,
+                    output_uri=args.output,
+                    dt=args.date,
+                    extra_conf=extra_conf or None,
+                )
+            except SparkUnavailableError as err:
+                print(f"error: {err}")
+                return 2
+            _print_json(result.to_dict())
+            return 0
+        parser.print_help()
+        return 0
+
     if args.command == "benchmark":
         if args.benchmark_command == "run":
             from robot_dh.lake.uri import to_local_path
@@ -1409,6 +1905,170 @@ def _main_impl(argv: list[str] | None = None) -> int:
         if args.benchmark_command == "report":
             text = render_summary_from_dir(args.benchmark_dir)
             print(text)
+            return 0
+        parser.print_help()
+        return 0
+
+    if args.command == "model":
+        from robot_dh.models import ModelRegistry, ModelSpec
+
+        registry = ModelRegistry(local_only=getattr(args, "local_only", False))
+        if args.model_command == "register":
+            if args.config:
+                specs = registry.register_from_config(args.config)
+                _print_json({"registered": [s.model_id for s in specs], "backend": registry.backend_kind})
+                return 0
+            if not (args.model_id and args.model_type and args.backend):
+                print("error: 需要 --config 或 (--model-id --model-type --backend)")
+                return 1
+            spec = ModelSpec(
+                model_id=args.model_id,
+                model_name=args.model_name or args.model_id,
+                model_type=args.model_type,
+                backend=args.backend,
+                endpoint_url=args.endpoint_url,
+                max_batch_size=args.max_batch_size,
+                timeout_sec=args.timeout_sec,
+                status=args.status,
+            )
+            registry.register(spec)
+            _print_json(spec.to_dict())
+            return 0
+        if args.model_command == "list":
+            _print_json([s.to_dict() for s in registry.list_specs()])
+            return 0
+        if args.model_command == "show":
+            spec = registry.get(args.model_id)
+            if spec is None:
+                print(f"model not found: {args.model_id}")
+                return 1
+            _print_json(spec.to_dict())
+            return 0
+        if args.model_command == "health":
+            health = registry.health(args.model_id)
+            _print_json(health.to_dict())
+            return 0 if health.ok else 1
+        parser.print_help()
+        return 0
+
+    if args.command == "infer":
+        if args.infer_command == "run":
+            from robot_dh.inference import run_inference
+            from robot_dh.inference.runner import InferenceJobError
+
+            try:
+                result = run_inference(
+                    input_uri=args.input,
+                    model_id=args.model_id,
+                    output_uri=args.output,
+                    task_type=args.task_type,
+                    split=args.split,
+                    limit=args.limit,
+                    batch_size=args.batch_size,
+                    max_workers=args.max_workers,
+                    retry=args.retry,
+                    timeout_sec=args.timeout_sec,
+                    fail_fast=args.fail_fast,
+                    dataset_id=args.dataset_id,
+                    version=args.version,
+                    record_to_registry=args.record_to_registry,
+                    local_only=args.local_only,
+                )
+            except InferenceJobError as err:
+                print(f"error: {err}")
+                return 1
+            _print_json(result.to_dict())
+            return result.exit_code
+        if args.infer_command == "list":
+            from robot_dh.ai_tasks.store import resolve_optional_engine
+            from robot_dh.inference import list_jobs
+
+            engine = resolve_optional_engine(None)
+            if engine is None:
+                print("error: 无可用 DB（infer list 需要 PostgreSQL / SQLite）")
+                return 1
+            _print_json(list_jobs(engine, limit=args.limit))
+            return 0
+        if args.infer_command == "show":
+            from robot_dh.ai_tasks.store import resolve_optional_engine
+            from robot_dh.inference import get_job
+
+            engine = resolve_optional_engine(None)
+            if engine is None:
+                print("error: 无可用 DB（infer show 需要 PostgreSQL / SQLite）")
+                return 1
+            job = get_job(engine, args.job_id)
+            if job is None:
+                print(f"job not found: {args.job_id}")
+                return 1
+            _print_json(job)
+            return 0
+        if args.infer_command == "report":
+            from robot_dh.lake.store import create_lake_store
+            from robot_dh.lake.uri import join_uri
+
+            store = create_lake_store(args.job_output)
+            report = store.read_json(join_uri(args.job_output, "inference_report.json"))
+            _print_json(report)
+            return 0
+        if args.infer_command == "retry":
+            from robot_dh.inference import run_inference
+            from robot_dh.inference.runner import InferenceJobError
+            from robot_dh.lake.uri import join_uri
+
+            failed_uri = join_uri(args.job_output, "failed_samples.parquet")
+            try:
+                result = run_inference(
+                    input_uri=failed_uri,
+                    model_id=args.model_id,
+                    output_uri=args.output,
+                    retry=args.retry,
+                    local_only=args.local_only,
+                )
+            except InferenceJobError as err:
+                print(f"error: {err}")
+                return 1
+            _print_json(result.to_dict())
+            return result.exit_code
+        if args.infer_command == "benchmark":
+            # 别名导入，避免在 _main_impl 函数作用域内 shadow 顶层 v1.5 run_benchmark。
+            from robot_dh.inference import run_benchmark as run_infer_benchmark
+
+            concurrency = [int(x) for x in str(args.concurrency).split(",") if x.strip()]
+            batch_sizes = [int(x) for x in str(args.batch_size).split(",") if x.strip()]
+            result = run_infer_benchmark(
+                input_uri=args.input,
+                model_id=args.model_id,
+                output_uri=args.output,
+                concurrency_list=concurrency,
+                batch_size_list=batch_sizes,
+                limit=args.limit,
+                local_only=args.local_only,
+            )
+            _print_json(result.to_dict())
+            return 0
+        parser.print_help()
+        return 0
+
+    if args.command == "distill":
+        if args.distill_command == "build":
+            from robot_dh.distill import build_distill
+
+            ratios = tuple(float(x) for x in str(args.split).split(",") if x.strip())
+            if len(ratios) != 3:
+                print("error: --split 需要 3 个值，如 0.8,0.1,0.1")
+                return 1
+            result = build_distill(
+                teacher_output_uri=args.teacher_output,
+                distill_format=args.format,
+                output_uri=args.output,
+                split=ratios,  # type: ignore[arg-type]
+                teacher_model=args.teacher_model,
+                dataset_id=args.dataset_id,
+                version=args.version,
+                local_only=args.local_only,
+            )
+            _print_json(result.to_dict())
             return 0
         parser.print_help()
         return 0

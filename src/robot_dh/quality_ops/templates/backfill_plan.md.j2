@@ -1,0 +1,19 @@
+# Backfill Plan {{ plan.plan_id }}
+
+- 生成时间：{{ generated_at }}
+- 数据集：`{{ plan.dataset_id or '*' }}` / version `{{ plan.version or '*' }}` / phase `{{ plan.phase or '*' }}`
+- 时间窗口：`{{ plan.from_date or '-' }}` ~ `{{ plan.to_date or '-' }}`
+- 任务数：{{ tasks|length }}
+- 状态：`{{ plan.status }}`
+- 原因：{{ plan.reason or '-' }}
+
+## 任务清单
+
+| dt | dataset_id | version | phase | status | recommended_command |
+|---|---|---|---|---|---|
+{% for t in tasks %}| {{ t.dt or '-' }} | {{ t.dataset_id or '-' }} | {{ t.version or '-' }} | {{ t.phase or '-' }} | {{ t.status }} | `{{ t.recommended_command }}` |
+{% endfor %}
+
+{% if not tasks %}
+> 当前 plan 没有 task；考虑放宽 status_filter 或扩大日期窗口。
+{% endif %}

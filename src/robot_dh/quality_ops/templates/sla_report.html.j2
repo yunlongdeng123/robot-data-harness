@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>robot-dh v1.8 SLA Report - {{ dt }}</title>
+  <style>
+    body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; margin: 24px; color: #222; }
+    h1 { margin: 0 0 12px; font-size: 22px; }
+    h2 { margin: 24px 0 8px; font-size: 16px; }
+    .meta { color: #888; font-size: 12px; margin-bottom: 16px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 8px; font-size: 13px; }
+    th, td { border: 1px solid #e6e9ed; padding: 6px 10px; text-align: left; vertical-align: top; }
+    th { background: #f6f8fa; }
+    .status-PASS { color: #1f883d; font-weight: 600; }
+    .status-WARN { color: #bf8700; font-weight: 600; }
+    .status-FAIL { color: #cf222e; font-weight: 600; }
+    .status-SKIPPED { color: #6a737d; font-style: italic; }
+    .empty { color: #999; font-style: italic; }
+    code { background: #f6f8fa; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>robot-dh v1.8 SLA Report</h1>
+  <div class="meta">dt = {{ dt }} &middot; 共 {{ checks|length }} 条 SLA 校验 &middot; 生成时间 {{ generated_at }}</div>
+
+  {% set buckets = group_by_status(checks) %}
+  <h2>状态分布</h2>
+  <table>
+    <thead><tr><th>状态</th><th>数量</th></tr></thead>
+    <tbody>
+      {% for status, items in buckets.items() %}
+      <tr><td class="status-{{ status }}">{{ status }}</td><td>{{ items|length }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>逐条 SLA 校验</h2>
+  {% if checks %}
+  <table>
+    <thead>
+      <tr>
+        <th>policy</th><th>dataset_id</th><th>version</th><th>status</th>
+        <th>qc</th><th>etl</th><th>wf</th>
+        <th>missing_outputs</th><th>failed_reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in checks %}
+      <tr>
+        <td>{{ c.policy_id }}</td>
+        <td>{{ c.dataset_id }}</td>
+        <td>{{ c.version }}</td>
+        <td class="status-{{ c.status }}">{{ c.status }}</td>
+        <td>{{ fmt_rate(c.qc_pass_rate) }}</td>
+        <td>{{ fmt_rate(c.etl_success_rate) }}</td>
+        <td>{{ fmt_rate(c.workflow_success_rate) }}</td>
+        <td>{% if c.missing_outputs %}<code>{{ ', '.join(c.missing_outputs) }}</code>{% else %}-{% endif %}</td>
+        <td>{{ c.failed_reason or '-' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">当日没有 SLA 校验记录。</div>
+  {% endif %}
+</body>
+</html>

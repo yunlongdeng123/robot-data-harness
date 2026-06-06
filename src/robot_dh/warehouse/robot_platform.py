@@ -17,7 +17,7 @@ DB 不可用 / 表缺失：
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 from sqlalchemy import inspect, select, desc
@@ -331,12 +331,43 @@ class PlatformWarehouse:
         metrics: dict[str, Any] | None = None,
         failed_rules: list[dict[str, Any]] | None = None,
         warning_rules: list[dict[str, Any]] | None = None,
+        all_rules: list[dict[str, Any]] | None = None,
         artifacts_uri: str | None = None,
         error_message: str | None = None,
     ) -> int | None:
+        """落 qc_contract_runs。
+
+        v1.8 修复要点（来自远端 PG 现网诊断）：
+
+        - **started_at 兜底**：CLI 入口历史上未传，导致 18/18 行 ``started_at IS NULL``，
+          下游 ``build_fact_qc_rule_result.sql`` 用 ``WHERE started_at::date BETWEEN ...``
+          全部过滤掉。这里没拿到时按 ``finished_at - duration_sec`` 反推，再退到 utcnow。
+        - **failed/warning_rules 用 JSON array**：早期写成 ``{"items":[...]}`` 包了一层，
+          PG 端 ``jsonb_array_elements`` 直接抛 “cannot get array length of a non-array”。
+          现在统一写 array；DML 端再做兼容旧 ``{items}`` 数据。
+        - **all_rules 通过 metrics_json._rule_results 携带**：远端 schema 没有
+          ``all_rules_json`` 列，但 PASS rule 必须落库否则 pass_rate=0/0=NULL。把全量
+          rule 列表 embed 进 ``metrics_json["_rule_results"]``，DML 从这里展开。
+        """
         try:
             if not self._ensure_or_warn("record_qc_contract_run"):
                 return None
+            now = _utcnow()
+            if finished_at is None:
+                finished_at = now
+            if started_at is None:
+                if duration_sec is not None and duration_sec > 0 and finished_at is not None:
+                    started_at = finished_at - timedelta(seconds=float(duration_sec))
+                else:
+                    started_at = finished_at
+
+            metrics_payload: dict[str, Any] = dict(metrics or {})
+            rules_payload = list(all_rules or [])
+            if not rules_payload:
+                # 兜底：用 failed+warning 拼一个最小 _rule_results，DML 仍能展开 contract_status
+                rules_payload = list(failed_rules or []) + list(warning_rules or [])
+            metrics_payload["_rule_results"] = rules_payload
+
             with self._session() as session:
                 row = QcContractRunRow(
                     run_id=run_id,
@@ -349,9 +380,9 @@ class PlatformWarehouse:
                     started_at=started_at,
                     finished_at=finished_at,
                     duration_sec=duration_sec,
-                    metrics_json=dict(metrics) if metrics else None,
-                    failed_rules_json={"items": list(failed_rules or [])},
-                    warning_rules_json={"items": list(warning_rules or [])},
+                    metrics_json=metrics_payload,
+                    failed_rules_json=list(failed_rules or []),
+                    warning_rules_json=list(warning_rules or []),
                     artifacts_uri=artifacts_uri,
                     error_message=error_message,
                 )
@@ -869,6 +900,19 @@ def _contract_to_dict(row: QcContractRow) -> dict[str, Any]:
     }
 
 
+def _normalize_rules_array(value: Any) -> list[dict[str, Any]] | None:
+    """兼容旧库 ``{"items":[...]}`` 与新格式 ``[...]``，统一返回 list。"""
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        inner = value.get("items")
+        if isinstance(inner, list):
+            return inner
+    return None
+
+
 def _contract_run_to_dict(row: QcContractRunRow) -> dict[str, Any]:
     return {
         "id": row.id,
@@ -883,12 +927,10 @@ def _contract_run_to_dict(row: QcContractRunRow) -> dict[str, Any]:
         "finished_at": row.finished_at.isoformat() if row.finished_at else None,
         "duration_sec": row.duration_sec,
         "metrics_json": row.metrics_json,
-        "failed_rules_json": (
-            row.failed_rules_json.get("items") if isinstance(row.failed_rules_json, dict) else None
-        ),
-        "warning_rules_json": (
-            row.warning_rules_json.get("items") if isinstance(row.warning_rules_json, dict) else None
-        ),
+        # v1.8 起 failed/warning_rules_json 直接是 array；保留对历史 {"items": [...]}
+        # 兜底的兼容路径，避免老库行被解析成 None。
+        "failed_rules_json": _normalize_rules_array(row.failed_rules_json),
+        "warning_rules_json": _normalize_rules_array(row.warning_rules_json),
         "artifacts_uri": row.artifacts_uri,
         "error_message": row.error_message,
         "created_at": row.created_at.isoformat() if row.created_at else None,

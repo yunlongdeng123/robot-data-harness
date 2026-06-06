@@ -1,0 +1,8 @@
+# v1.9 推理任务默认参数（可被 robot-dh infer run 命令行覆盖）。
+batch_size: 32
+max_workers: 4
+retry: 2
+timeout_sec: 60
+fail_fast: false
+# 失败率超过此阈值则 job 判 FAILED（exit 1）；低于则 SUCCEEDED（部分失败时带 WARN）。
+max_error_rate: 0.5

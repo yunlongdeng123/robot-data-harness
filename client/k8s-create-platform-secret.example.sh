@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# robot-dh v1.6 Secret 创建脚本示例。
+# robot-dh 平台 Secret 创建脚本示例（v1.9 AI Inference Data Plane Lite）。
 #
 # 推荐用法（pass-through 模式）：
-#   1) 云端：./scripts/41_export_platform_client_env.sh --show-secrets
+#   1) 云端：./scripts/49_export_inference_client_env.sh --show-secrets
 #   2) scp 到 WSL host，然后：
 #        set -a; source client/robot-dh-platform.env; set +a
 #        ./client/k8s-create-platform-secret.example.sh
@@ -12,10 +12,10 @@
 #   时，脚本按组件拼接 URI。
 #
 # 不论哪种模式，apply 前会做硬校验：
-#   - 任何 CHANGE_ME* / 占位符 / 空值都立即拒绝
+#   - 任何 CHANGE_ME* / 占位符 / 空值都立即拒绝（OpenAI api_key 可选除外）
 #   - 默认拒绝 127.0.0.1 / localhost；WSL host 单进程可加 --allow-localhost
-#   - v1.6 三个新前缀（QC / ML-ready / workflow tmp）必须以 s3:// 开头，且
-#     不能指向 raw / ods / dwd / ads / lineage
+#   - v1.6 三个前缀（QC / ML-ready / workflow tmp）+ v1.9 两个输出根（infer / distill）
+#     必须以 s3:// 开头，且不能指向 raw / ods / dwd / ads / lineage
 set -euo pipefail
 
 NAMESPACE=${NAMESPACE:-robot-dh}
@@ -29,8 +29,8 @@ Usage: $0 [--allow-localhost] [--dry-run]
 
 推荐：先 set -a; source client/robot-dh-platform.env; set +a
 
-Pass-through 期望的变量（41_export_platform_client_env.sh 已全部输出）：
-  ROBOT_DH_PLATFORM_VERSION       1.6
+Pass-through 期望的变量（49_export_inference_client_env.sh 已全部输出）：
+  ROBOT_DH_PLATFORM_VERSION       1.9
   ROBOT_DH_DB_URI                 postgresql+psycopg://USER:PASS@HOST:5432/DB
   ROBOT_DH_S3_ENDPOINT_URL        http://HOST:9000
   ROBOT_DH_S3_ACCESS_KEY
@@ -43,6 +43,11 @@ Pass-through 期望的变量（41_export_platform_client_env.sh 已全部输出�
   ROBOT_DH_QC_CONTRACT_BUCKET_PREFIX  s3://robot-lake/qc
   ROBOT_DH_ML_READY_ROOT              s3://robot-lake/ml-ready
   ROBOT_DH_WORKFLOW_TMP_PREFIX        s3://robot-lake/tmp/workflows
+  ROBOT_DH_INFER_OUTPUT_ROOT          s3://robot-lake/infer
+  ROBOT_DH_DISTILL_OUTPUT_ROOT        s3://robot-lake/distill
+  ROBOT_DH_DEFAULT_INFER_BACKEND      mock
+  ROBOT_DH_OPENAI_COMPATIBLE_BASE_URL 可选，openai_compatible 后端才需要
+  ROBOT_DH_OPENAI_COMPATIBLE_API_KEY  可选，openai_compatible 后端才需要
 
 Component fallback（pass-through 缺值时使用）：
   PUBLIC_HOST            公网 IP 或 DNS
@@ -81,7 +86,7 @@ ROBOT_DH_DATA_BUCKET_FALLBACK=${ROBOT_DH_DATA_BUCKET:-robot-datasets}
 ROBOT_DH_ARTIFACT_BUCKET_FALLBACK=${ROBOT_DH_ARTIFACT_BUCKET:-robot-dh-artifacts}
 ROBOT_DH_LAKE_BUCKET_FALLBACK=${ROBOT_DH_LAKE_BUCKET:-robot-lake}
 
-SECRET_PLATFORM=${ROBOT_DH_PLATFORM_VERSION:-1.6}
+SECRET_PLATFORM=${ROBOT_DH_PLATFORM_VERSION:-1.9}
 SECRET_DB_URI=${ROBOT_DH_DB_URI:-}
 SECRET_S3_ENDPOINT=${ROBOT_DH_S3_ENDPOINT_URL:-}
 SECRET_S3_REGION=${ROBOT_DH_S3_REGION:-us-east-1}
@@ -94,6 +99,13 @@ SECRET_REDIS_URL=${ROBOT_DH_REDIS_URL:-}
 SECRET_QC_PREFIX=${ROBOT_DH_QC_CONTRACT_BUCKET_PREFIX:-s3://${SECRET_S3_LAKE_BUCKET}/qc}
 SECRET_ML_READY=${ROBOT_DH_ML_READY_ROOT:-s3://${SECRET_S3_LAKE_BUCKET}/ml-ready}
 SECRET_WORKFLOW_TMP=${ROBOT_DH_WORKFLOW_TMP_PREFIX:-s3://${SECRET_S3_LAKE_BUCKET}/tmp/workflows}
+
+# v1.9 推理数据平面变量：输出根 / 默认后端必填；OpenAI-compatible 两项可选（可空）。
+SECRET_INFER_OUTPUT_ROOT=${ROBOT_DH_INFER_OUTPUT_ROOT:-s3://${SECRET_S3_LAKE_BUCKET}/infer}
+SECRET_DISTILL_OUTPUT_ROOT=${ROBOT_DH_DISTILL_OUTPUT_ROOT:-s3://${SECRET_S3_LAKE_BUCKET}/distill}
+SECRET_DEFAULT_INFER_BACKEND=${ROBOT_DH_DEFAULT_INFER_BACKEND:-mock}
+SECRET_OPENAI_BASE_URL=${ROBOT_DH_OPENAI_COMPATIBLE_BASE_URL:-}
+SECRET_OPENAI_API_KEY=${ROBOT_DH_OPENAI_COMPATIBLE_API_KEY:-}
 
 # Component fallback
 if [[ -z "$SECRET_DB_URI" || -z "$SECRET_S3_ENDPOINT" || -z "$SECRET_REDIS_URL" ]]; then
@@ -135,6 +147,9 @@ declare -A FIELDS=(
   [ROBOT_DH_QC_CONTRACT_BUCKET_PREFIX]="$SECRET_QC_PREFIX"
   [ROBOT_DH_ML_READY_ROOT]="$SECRET_ML_READY"
   [ROBOT_DH_WORKFLOW_TMP_PREFIX]="$SECRET_WORKFLOW_TMP"
+  [ROBOT_DH_INFER_OUTPUT_ROOT]="$SECRET_INFER_OUTPUT_ROOT"
+  [ROBOT_DH_DISTILL_OUTPUT_ROOT]="$SECRET_DISTILL_OUTPUT_ROOT"
+  [ROBOT_DH_DEFAULT_INFER_BACKEND]="$SECRET_DEFAULT_INFER_BACKEND"
 )
 bad=0
 for key in "${!FIELDS[@]}"; do
@@ -150,13 +165,14 @@ for key in "${!FIELDS[@]}"; do
   fi
 done
 if [[ $bad -ne 0 ]]; then
-  echo "Hint: 在云端执行 ./scripts/41_export_platform_client_env.sh --show-secrets" >&2
+  echo "Hint: 在云端执行 ./scripts/49_export_inference_client_env.sh --show-secrets" >&2
   echo "      再 scp 到 WSL，然后 set -a; source client/robot-dh-platform.env; set +a" >&2
   exit 1
 fi
 
-# v1.6 三个新前缀必须 s3:// 开头，且不能指向受保护层
-for var in SECRET_QC_PREFIX SECRET_ML_READY SECRET_WORKFLOW_TMP; do
+# v1.6 三个前缀 + v1.9 两个输出根必须 s3:// 开头，且不能指向受保护层
+for var in SECRET_QC_PREFIX SECRET_ML_READY SECRET_WORKFLOW_TMP \
+           SECRET_INFER_OUTPUT_ROOT SECRET_DISTILL_OUTPUT_ROOT; do
   val="${!var}"
   if [[ "$val" != s3://* ]]; then
     echo "ERROR: $var 必须以 s3:// 开头（当前=$val）" >&2
@@ -164,7 +180,7 @@ for var in SECRET_QC_PREFIX SECRET_ML_READY SECRET_WORKFLOW_TMP; do
   fi
   case "$val" in
     *://*/raw/*|*://*/ods/*|*://*/dwd/*|*://*/ads/*|*://*/lineage/*|*://*/manifests/*)
-      echo "ERROR: $var 指向受保护数据层 ($val)，禁止；只允许 qc / ml-ready / tmp" >&2
+      echo "ERROR: $var 指向受保护数据层 ($val)，禁止；只允许 qc / ml-ready / tmp / infer / distill" >&2
       exit 1
       ;;
   esac
@@ -207,6 +223,11 @@ kubectl_apply_cmd=(
   --from-literal=ROBOT_DH_QC_CONTRACT_BUCKET_PREFIX="$SECRET_QC_PREFIX"
   --from-literal=ROBOT_DH_ML_READY_ROOT="$SECRET_ML_READY"
   --from-literal=ROBOT_DH_WORKFLOW_TMP_PREFIX="$SECRET_WORKFLOW_TMP"
+  --from-literal=ROBOT_DH_INFER_OUTPUT_ROOT="$SECRET_INFER_OUTPUT_ROOT"
+  --from-literal=ROBOT_DH_DISTILL_OUTPUT_ROOT="$SECRET_DISTILL_OUTPUT_ROOT"
+  --from-literal=ROBOT_DH_DEFAULT_INFER_BACKEND="$SECRET_DEFAULT_INFER_BACKEND"
+  --from-literal=ROBOT_DH_OPENAI_COMPATIBLE_BASE_URL="$SECRET_OPENAI_BASE_URL"
+  --from-literal=ROBOT_DH_OPENAI_COMPATIBLE_API_KEY="$SECRET_OPENAI_API_KEY"
   --dry-run=client
   -o yaml
 )
@@ -222,4 +243,5 @@ fi
 echo "Applied secret $SECRET_NAME in namespace $NAMESPACE."
 echo "DB host=$DB_HOST  S3 host=$S3_HOST  Redis host=$REDIS_HOST"
 echo "Platform version=$SECRET_PLATFORM  QC prefix=$SECRET_QC_PREFIX  ML-ready=$SECRET_ML_READY"
-echo "（其他凭据已脱敏，不会打印）"
+echo "Infer root=$SECRET_INFER_OUTPUT_ROOT  Distill root=$SECRET_DISTILL_OUTPUT_ROOT  default backend=$SECRET_DEFAULT_INFER_BACKEND"
+echo "（其他凭据 / OpenAI api_key 已脱敏，不会打印）"

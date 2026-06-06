@@ -24,6 +24,7 @@ type Collector struct {
 
 	gauges     *registeredGauges
 	gaugesPlat *platformGauges
+	gaugesWh   *warehouseGauges
 
 	lastScrape    time.Time
 	lastScrapeErr string
@@ -126,12 +127,14 @@ func MustRegister(reg prometheus.Registerer, querier *db.Querier, interval time.
 		reg.MustRegister(c)
 	}
 	platGauges := registerPlatform(reg)
+	whGauges := registerWarehouse(reg)
 	return &Collector{
 		logger:     logger,
 		querier:    querier,
 		interval:   interval,
 		gauges:     g,
 		gaugesPlat: platGauges,
+		gaugesWh:   whGauges,
 	}
 }
 
@@ -275,6 +278,9 @@ func (c *Collector) scrape(ctx context.Context) error {
 	}
 
 	if !c.scrapePlatform(scrapeCtx) {
+		ok = false
+	}
+	if !c.scrapeWarehouse(scrapeCtx) {
 		ok = false
 	}
 	c.gauges.scrapeDuration.Set(time.Since(start).Seconds())

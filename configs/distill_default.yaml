@@ -1,0 +1,8 @@
+# v1.9 蒸馏默认参数（可被 robot-dh distill build 命令行覆盖）。
+split:
+  train: 0.8
+  val: 0.1
+  test: 0.1
+instruction_templates:
+  caption: "Describe the robot episode."
+  anomaly: "Determine whether the robot episode is anomalous."

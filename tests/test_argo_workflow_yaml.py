@@ -71,7 +71,7 @@ def test_no_real_secrets(path: Path) -> None:
 
 
 # ---------- v1.6 Argo log archive（来自 robot-dh-infra 的需求）----------
-# 详见 docs/v1_6_argo_log_archive_request.md / docs/v1_6_argo_log_archive_handoff.md。
+# 详见 docs/history/v1_6_argo_log_archive_request.md / docs/history/v1_6_argo_log_archive_handoff.md。
 # WorkflowTemplate 顶层 podGC.strategy 必须给 controller 留出 archiveLogs 的窗口，
 # 不能是 OnPodCompletion / OnPodSuccess（这会让 step pod 终态立刻 GC，stdout 丢失）。
 _LOG_ARCHIVE_TEMPLATES = [

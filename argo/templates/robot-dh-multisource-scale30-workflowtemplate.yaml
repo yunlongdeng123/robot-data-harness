@@ -171,6 +171,21 @@ spec:
             depends: "publish-lineage-report"
             template: argo-sync
 
+          # v1.8 收尾段：argo-sync 把 workflow_runs/steps 落库后，立刻物化 DIM/FACT/DWS/ADS
+          # + 出质检报告 + SLA 检查；prod 路径与 v1.7 local-devscale 走同一条 DAG 设计。
+          - name: warehouse-init
+            depends: "argo-sync"
+            template: warehouse-init
+          - name: warehouse-build
+            depends: "warehouse-init"
+            template: warehouse-build
+          - name: quality-report
+            depends: "warehouse-build"
+            template: quality-report
+          - name: sla-check
+            depends: "warehouse-build"
+            template: sla-check
+
     - name: lake-list
       container:
         image: robot-data-harness:local
@@ -529,3 +544,105 @@ spec:
         resources:
           requests: {cpu: 200m, memory: 256Mi}
           limits: {cpu: 1, memory: 1Gi}
+
+    # ====================== v1.8 warehouse 收尾段 ======================
+    - name: warehouse-init
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["robot-dh"]
+        args: ["warehouse", "init", "--config", "configs/warehouse.yaml"]
+        envFrom:
+          - secretRef: {name: robot-dh-v1-6-secrets}
+          - configMapRef: {name: robot-dh-v1-6-config, optional: true}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 200m, memory: 256Mi}
+          limits: {cpu: 1, memory: 1Gi}
+      activeDeadlineSeconds: 300
+
+    - name: warehouse-build
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -o pipefail
+            DT_TODAY="$(date -u +%Y-%m-%d)"
+            DT_YDAY="$(date -u -d '1 day ago' +%Y-%m-%d)"
+            robot-dh warehouse build \
+              --config configs/warehouse.yaml \
+              --from-date "${DT_YDAY}" --to-date "${DT_TODAY}" \
+              --layers dim,fact,dws,ads
+        envFrom:
+          - secretRef: {name: robot-dh-v1-6-secrets}
+          - configMapRef: {name: robot-dh-v1-6-config, optional: true}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 500m, memory: 512Mi}
+          limits: {cpu: 2, memory: 2Gi}
+      activeDeadlineSeconds: 1800
+
+    - name: quality-report
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -o pipefail
+            OUT="{{workflow.parameters.lake_root}}/quality-reports/{{workflow.name}}"
+            robot-dh quality report --output "${OUT}"
+        envFrom:
+          - secretRef: {name: robot-dh-v1-6-secrets}
+          - configMapRef: {name: robot-dh-v1-6-config, optional: true}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 200m, memory: 512Mi}
+          limits: {cpu: 1, memory: 2Gi}
+      activeDeadlineSeconds: 900
+
+    - name: sla-check
+      container:
+        image: robot-data-harness:local
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -o pipefail
+            OUT="{{workflow.parameters.lake_root}}/sla-reports/{{workflow.name}}"
+            robot-dh sla check --policy configs/sla_policies.yaml
+            robot-dh sla report --policy configs/sla_policies.yaml --output "${OUT}"
+        envFrom:
+          - secretRef: {name: robot-dh-v1-6-secrets}
+          - configMapRef: {name: robot-dh-v1-6-config, optional: true}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 200m, memory: 512Mi}
+          limits: {cpu: 1, memory: 2Gi}
+      activeDeadlineSeconds: 900
